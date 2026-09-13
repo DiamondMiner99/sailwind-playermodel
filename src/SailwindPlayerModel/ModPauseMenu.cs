@@ -10,7 +10,7 @@ namespace SailwindPlayerModel
     /// screen's parchment scroll (mesh 'scroll_open'), parented under the StartMenu root so it inherits
     /// MoveMenuToPlayer's camera-facing orientation, with a clean button column.
     ///
-    /// It ships four buttons of its own - Resume, Character, Settings, Quit Game - and OTHER MODS ADD THEIR
+    /// It ships five buttons of its own - Resume, Character, Settings, Recover Boat, Quit Game - and OTHER MODS ADD THEIR
     /// OWN with <see cref="Register"/>. That is the whole reason this lives here rather than in the co-op mod
     /// where it started: two mods each cloning their own parchment would fight over Escape and draw two
     /// scrolls on top of each other. One menu, many contributors.
@@ -28,6 +28,7 @@ namespace SailwindPlayerModel
         public const string Resume    = "modpause_resume";
         public const string Character = "modpause_character";
         public const string Settings  = "modpause_settings";
+        public const string Recover   = "modpause_recover";
         public const string Quit      = "modpause_quit";
 
         /// <summary>Order values for the built-in buttons, so a registering mod can slot in around them.</summary>
@@ -36,6 +37,7 @@ namespace SailwindPlayerModel
             public const int Resume = 0;
             public const int Character = 300;
             public const int Settings = 400;
+            public const int Recover = 500;
             public const int Quit = 900;
         }
 
@@ -142,6 +144,7 @@ namespace SailwindPlayerModel
         public static void Register(Entry entry)
         {
             if (entry == null || string.IsNullOrEmpty(entry.Id)) return;
+            RegisterBuiltIns(); // so a mod registering from its Awake sorts against the built-ins from the start
             _entries.RemoveAll(e => e.Id == entry.Id);
             _entries.Add(entry);
             _entries.Sort((a, b) => a.Order.CompareTo(b.Order));
@@ -161,6 +164,24 @@ namespace SailwindPlayerModel
             var t = _panel != null ? MenuUtil.FindChild(_panel.transform, id) : null;
             if (t != null) UnityEngine.Object.Destroy(t.gameObject);
             Plugin.Log.LogInfo($"[PauseMenu] Unregistered button '{id}'");
+        }
+
+        /// <summary>
+        /// Replace the visibility rule of a registered button, built-ins included. Null means always shown.
+        /// Co-op uses this to hide Recover Boat from guests, who must not recover the shared boat locally.
+        /// Safe to call from a plugin's Awake: the built-ins are registered on demand.
+        /// </summary>
+        public static void SetVisible(string id, Func<bool> visible)
+        {
+            RegisterBuiltIns();
+            for (int i = 0; i < _entries.Count; i++)
+            {
+                if (_entries[i].Id != id) continue;
+                _entries[i].Visible = visible;
+                Plugin.Log.LogInfo($"[PauseMenu] Visibility rule set on '{id}'");
+                return;
+            }
+            Plugin.Log.LogWarning($"[PauseMenu] SetVisible: no button '{id}'");
         }
 
         static void RegisterBuiltIns()
@@ -201,6 +222,19 @@ namespace SailwindPlayerModel
                     SubPageFromPause = true;
                     InvokeStartMenu("EnableSettingsMenu");
                     HideInSettingsRecoverQuit(); // we have dedicated Quit; hide the in-settings duplicates
+                },
+            });
+
+            Register(new Entry
+            {
+                Id = Recover,
+                Order = Order.Recover,
+                Label = () => "Recover Boat",
+                OnClick = () =>
+                {
+                    Hide();
+                    SubPageFromPause = true; // Back or Esc out of the recovery screen returns to our panel
+                    InvokeStartMenu("EnableRecoveryMenu");
                 },
             });
 

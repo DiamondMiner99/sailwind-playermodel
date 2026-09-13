@@ -5,18 +5,17 @@ namespace SailwindPlayerModel
 {
     /// <summary>
     /// The public surface other mods drive. Everything here is safe to call at any time: before a body exists,
-    /// in a menu, at sea with no shopkeeper ever loaded. Nothing throws, and the "no body" answers are all
-    /// meaningful ones (false, null, no-op) rather than errors to guard against.
+    /// in a menu, during loading. Nothing throws, and the "no body" answers are all meaningful ones (false,
+    /// null, no-op) rather than errors to guard against.
     ///
-    /// The one thing a consumer must internalize: <see cref="IsBodyAvailable"/> can be false for an entire
-    /// session. A body is cloned from a live shopkeeper found in the loaded scene, so a player who loads a save
-    /// at sea and never docks has no body to pose. Every feature built on this needs a path for that.
+    /// <see cref="IsBodyAvailable"/> is false until the world has loaded and the body has been built from a
+    /// port NPC, which normally happens within a couple of seconds of a save loading. Features built on this
+    /// still need a path for the false case: menus, loading, and a session where no NPC could be found.
     /// </summary>
     public static class PlayerModel
     {
         /// <summary>
-        /// True once a body exists and is posable. False before a shopkeeper has ever loaded this session, in
-        /// menus, and between scene loads.
+        /// True once a body exists and is posable. False in menus, during loading, and between scene loads.
         /// </summary>
         public static bool IsBodyAvailable
         {
@@ -60,8 +59,7 @@ namespace SailwindPlayerModel
         /// stand down for the parts named, and the optional write callback runs each LateUpdate at a defined
         /// point - after the unclaimed parts are posed, in ascending priority order. Dispose to hand them back.
         ///
-        /// Returns null if there is no body. That is the normal "at sea, never docked" answer, not a failure,
-        /// so check it rather than dereferencing.
+        /// Returns null if there is no body yet (menus, loading), so check it rather than dereferencing.
         /// </summary>
         public static IDisposable ClaimPose(string owner, int priority = PosePriority.Ambient,
             PoseParts parts = PoseParts.All, Action<SyntyBody> write = null)

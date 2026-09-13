@@ -101,6 +101,22 @@ namespace SailwindPlayerModel
             }
         }
 
+        // WindSound.Update guards Time.timeScale but not Time.deltaTime. When ModPauseMenu restores the
+        // timescale from inside the paused frame (KeepWorldRunning, so a co-op host keeps simulating), that
+        // frame still has deltaTime 0: the guard passes, the position delta is divided by zero, and with a
+        // stationary player 0/0 puts NaN into apparentWind. Lerp never recovers from a NaN endpoint, so every
+        // pitch write after that is refused and Unity logs "Attempt to set pitch to infinite value" once per
+        // frame for the rest of the session. Vanilla never sees this because its own restore runs after
+        // WindSound.Update in the frame. A zero-delta frame has nothing to integrate, so skipping it is safe.
+        [HarmonyPatch(typeof(WindSound), "Update")]
+        public static class WindSoundZeroDeltaPatch
+        {
+            static bool Prefix()
+            {
+                return Time.deltaTime > 0f;
+            }
+        }
+
         // Route clicks on our cloned buttons. The StartMenuButton sits on a 'bg+trigger' child while our
         // marker name is on an ANCESTOR, so walk up. A misread would fire the vanilla action instead.
         [HarmonyPatch(typeof(StartMenuButton), "OnActivate", new Type[0])]

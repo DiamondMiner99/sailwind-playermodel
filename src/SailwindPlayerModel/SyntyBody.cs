@@ -162,6 +162,7 @@ namespace SailwindPlayerModel
                 // Defensive: the LIVE clone must never act as a merchant or carry physics, even if the cached
                 // template somehow retained anything. Disable immediately (Destroy is deferred) before it goes live.
                 foreach (var sk in body.GetComponentsInChildren<Shopkeeper>(true)) { sk.enabled = false; UnityEngine.Object.Destroy(sk); }
+                foreach (var pd in body.GetComponentsInChildren<PortDude>(true)) { pd.enabled = false; UnityEngine.Object.Destroy(pd); }
                 foreach (var col in body.GetComponentsInChildren<Collider>(true)) { col.enabled = false; UnityEngine.Object.Destroy(col); }
                 foreach (var rb in body.GetComponentsInChildren<Rigidbody>(true)) UnityEngine.Object.Destroy(rb);
 
