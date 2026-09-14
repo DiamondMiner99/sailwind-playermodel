@@ -68,7 +68,7 @@ namespace SailwindPlayerModel
             // CharacterController instead (VanillaPlayer.ControllerFeetGap). This knob is only the residual
             // nudge on top.
             SoleOffsetMeters = cfg.Bind(SecPose, "SoleOffsetMeters", 0f,
-                new ConfigDescription("Fine adjustment (meters) to how high bodies stand relative to the surface under them. POSITIVE raises, NEGATIVE sinks. Leave at 0 unless bodies visibly hover above or sink into decks; the base value is measured from the game rather than assumed. Takes effect on the next body build (leave and re-enter third person, or rejoin).",
+                new ConfigDescription("Fine adjustment (meters) to how high bodies stand relative to the surface under them. POSITIVE raises, NEGATIVE sinks. Leave at 0 unless bodies visibly hover above or sink into decks; the base value is measured from the game rather than assumed. Takes effect immediately.",
                     new AcceptableValueRange<float>(-0.5f, 0.5f)));
 
             // LOOK-LEAN. The upper body (Spine_01 -> chest/head/arms) pitches on the hips toward where the

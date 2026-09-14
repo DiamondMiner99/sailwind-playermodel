@@ -128,6 +128,11 @@ namespace SailwindPlayerModel
         private bool _heldBig;
         private int _heldFrame = -10;
 
+        // Frame at which to check that vanilla's Start actually dressed the clone. 0 = done.
+        private int _dressCheckFrame;
+        // The sole-offset nudge the plant was fitted with, so a config change can be applied as a delta.
+        private float _fittedNudge;
+
         private SyntyBody(string name, Transform root, Func<float> feetLocalY)
         {
             _name = name;
@@ -192,6 +197,7 @@ namespace SailwindPlayerModel
                 var self = new SyntyBody(name, root, feetLocalY);
                 self._instance = body;
                 self._renderers = body.GetComponentsInChildren<Renderer>(true);
+                self._dressCheckFrame = Time.frameCount + 2; // Start runs before next frame's Update
                 self.SetupRig(body);
                 return self;
             }
@@ -279,6 +285,7 @@ namespace SailwindPlayerModel
         public void Destroy()
         {
             Poses.Clear();
+            PlayerAppearance.ReleaseOwnedMaterial(_instance);
             if (_instance != null) UnityEngine.Object.Destroy(_instance);
             _instance = null;
             _renderers = null;
@@ -343,12 +350,46 @@ namespace SailwindPlayerModel
         public void Tick(float dt)
         {
             if (_instance == null || _root == null) return;
+            if (_dressCheckFrame > 0 && Time.frameCount >= _dressCheckFrame) { _dressCheckFrame = 0; VerifyDressed(); }
             if (_needsFit) Fit();
+            else if (_hasBodyBase) ReplantIfNudged();
             DriveAnimation(Mathf.Max(dt, 1e-4f));
             // OUTSIDE DriveAnimation on purpose: that returns early on a rig whose leg bones were not found,
             // and a claimant writing the body's own position (PoseParts.Body) needs no bones at all. A claim
             // that silently never ran would be far worse than a body that does not walk.
             Poses.RunWrites(this);
+        }
+
+        /// <summary>
+        /// Vanilla's Start builds the outfit, and if it throws part-way (an index its lists cannot serve) the
+        /// body is left at its bare defaults with no word from anyone. So count what it enabled: a dressed
+        /// character has at least a dozen parts on. If it came up short, say so with the numbers a report
+        /// needs, then run the build again ourselves so the exception, if any, lands in OUR log.
+        /// </summary>
+        private void VerifyDressed()
+        {
+            try
+            {
+                var c = _instance.GetComponentInChildren<PsychoticLab.CharacterCustomizer>(true);
+                if (c == null) return;
+                int n = c.enabledObjects != null ? c.enabledObjects.Count : 0;
+                if (n >= 12) return;
+                Plugin.Log.LogWarning($"[PlayerModel] '{_name}' came up with only {n} part(s) enabled " +
+                    $"(female={c.isFemale} head={c.maleHeadAllElements} eyebrow={c.maleEyebrow} facialhair={c.maleFacialHair} " +
+                    $"torso={c.maleTorso} hips={c.maleHips} legs={c.maleLeg_Right} hair={c.allGenderAll_Hair} hat={c.allGenderHeadCoverings_Base_Hair}; " +
+                    $"{BodyTemplate.DescribeParts(_instance)}). Rebuilding the outfit.");
+                try
+                {
+                    HarmonyLib.Traverse.Create(c).Method("UpdateModel").GetValue();
+                    int n2 = c.enabledObjects != null ? c.enabledObjects.Count : 0;
+                    Plugin.Log.LogInfo($"[PlayerModel] '{_name}' rebuild enabled {n2} part(s)");
+                }
+                catch (Exception e)
+                {
+                    Plugin.Log.LogWarning($"[PlayerModel] '{_name}' outfit rebuild threw: {(e.InnerException ?? e).Message}");
+                }
+            }
+            catch (Exception e) { Plugin.Log.LogWarning("[PlayerModel] VerifyDressed: " + e.Message); }
         }
 
         /// <summary>
@@ -369,7 +410,8 @@ namespace SailwindPlayerModel
             for (int i = 1; i < _renderers.Length; i++) wb.Encapsulate(_renderers[i].bounds);
             if (wb.size.y < 0.5f) return; // bounds not ready yet (degenerate) - retry next frame
 
-            float feetLocalY = _feetLocalY() + BodyTuning.SoleOffsetMeters.Value;
+            _fittedNudge = BodyTuning.SoleOffsetMeters.Value;
+            float feetLocalY = _feetLocalY() + _fittedNudge;
             _instance.transform.localPosition = new Vector3(0f, feetLocalY, 0f);
             _bodyBaseLocalPos = _instance.transform.localPosition;
             _hasBodyBase = true;
@@ -389,6 +431,27 @@ namespace SailwindPlayerModel
             Plugin.Log.LogInfo($"[PlayerModel] {_name} fit: feetLocalY={feetLocalY:F3} (nudge {BodyTuning.SoleOffsetMeters.Value:F3}), " +
                 $"bodyH={MeasuredHeight:F3}, boundsMinBelowPivot={(feetLocalY - boundsMinLocalY):F3}, " +
                 $"legIk={_legIkReady}, armIk={_armR.Ready}");
+        }
+
+        /// <summary>
+        /// Apply a changed sole-offset config live, as a delta on the planted base. The fit itself must not
+        /// re-run (see CaptureLegIkBind), but a vertical shift of the whole body is safe as long as the
+        /// root-local standing ankle targets move with it; otherwise the leg IK would pull the feet back to
+        /// the old height and stretch the legs. Before this the knob only took effect on the next body
+        /// build, which read as "nothing I adjust does anything".
+        /// </summary>
+        private void ReplantIfNudged()
+        {
+            float nudge = BodyTuning.SoleOffsetMeters != null ? BodyTuning.SoleOffsetMeters.Value : 0f;
+            float dy = nudge - _fittedNudge;
+            if (Mathf.Abs(dy) < 1e-4f) return;
+            _fittedNudge = nudge;
+            _bodyBaseLocalPos.y += dy;
+            FittedFeetLocalY += dy;
+            _footLocalL.y += dy;
+            _footLocalR.y += dy;
+            _instance.transform.localPosition = _bodyBaseLocalPos;
+            Plugin.Log.LogInfo($"[PlayerModel] {_name} re-planted: sole offset {nudge:F3} (feetLocalY now {FittedFeetLocalY:F3})");
         }
 
         private void CaptureArmIkBind()

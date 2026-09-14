@@ -7,8 +7,8 @@ other mods can add buttons to.
 
 - Player model visible in the boat camera. It walks, crouches, turns with your view, and holds your held
   item. Not shown in first person.
-- Character screen: head, hair, eyebrows, facial hair, hat, torso, hips, legs. Uses the game's NPC parts.
-  Opened from the pause menu.
+- Character screen: head, hair, eyebrows, facial hair, hat, torso, hips, legs, and colors for skin, hair,
+  cloth, trim, leather and metal. Uses the game's NPC parts. Opened from the pause menu.
 - Pause menu: Esc opens a menu with Resume, Character, Settings, Recover Boat and Quit Game. Settings
   opens the normal settings screen and Recover Boat opens the game's boat recovery screen.
 - The model is cloned from the game's NPCs at runtime, so there are no asset files.

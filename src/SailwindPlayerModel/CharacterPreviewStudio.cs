@@ -124,6 +124,7 @@ namespace SailwindPlayerModel
             {
                 if (_camera != null) _camera.targetTexture = null;
                 if (_rt != null) { _rt.Release(); Object.Destroy(_rt); _rt = null; }
+                PlayerAppearance.ReleaseOwnedMaterial(_mannequin);
                 if (_root != null) Object.Destroy(_root);
             }
             catch (System.Exception e) { Plugin.Log.LogWarning("[Character] Studio teardown: " + e.Message); }

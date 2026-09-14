@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Text;
 using PsychoticLab;
 using UnityEngine;
@@ -125,12 +126,169 @@ namespace SailwindPlayerModel
 
         public static int SlotCount { get { return Slots.Length; } }
 
+        // ---- colors ------------------------------------------------------------------------------------
+        // Every Synty part shares ONE material (shader SyntyStudios/CustomCharacter) whose color properties
+        // decide what the cloth, leather, metal, hair and skin regions of the atlas look like. Each body gets
+        // its own copy of the template's material and these slots write into it. Value 0 on a slot means
+        // "as the cloned NPC wears it", which is what every appearance string from before colors existed
+        // decodes to, so nobody's look changes on update until they pick something.
+
+        public struct ColorOption
+        {
+            public readonly string Name;
+            public readonly Color Color;
+            public ColorOption(string name, float r, float g, float b) { Name = name; Color = new Color(r, g, b, 1f); }
+        }
+
+        public sealed class ColorSlot
+        {
+            public readonly string Key;           // stable wire/config token - NEVER renamed once shipped
+            public readonly string Label;
+            public readonly string[] Props;       // every property the slot writes; restored from the template for value 0
+            public readonly ColorOption[] Palette;
+            public readonly Action<Material, Color> Write;
+            public ColorSlot(string key, string label, string[] props, ColorOption[] palette, Action<Material, Color> write)
+            { Key = key; Label = label; Props = props; Palette = palette; Write = write; }
+        }
+
+        static readonly ColorOption[] ClothPalette =
+        {
+            new ColorOption("White", 0.92f, 0.90f, 0.85f), new ColorOption("Cream", 0.90f, 0.84f, 0.68f),
+            new ColorOption("Sand", 0.80f, 0.70f, 0.52f),  new ColorOption("Tan", 0.66f, 0.52f, 0.36f),
+            new ColorOption("Brown", 0.45f, 0.32f, 0.22f), new ColorOption("Dark brown", 0.28f, 0.20f, 0.14f),
+            new ColorOption("Red", 0.70f, 0.18f, 0.16f),   new ColorOption("Maroon", 0.45f, 0.12f, 0.14f),
+            new ColorOption("Orange", 0.85f, 0.45f, 0.15f), new ColorOption("Mustard", 0.80f, 0.65f, 0.20f),
+            new ColorOption("Green", 0.25f, 0.50f, 0.25f), new ColorOption("Olive", 0.40f, 0.42f, 0.22f),
+            new ColorOption("Teal", 0.18f, 0.48f, 0.48f),  new ColorOption("Sky", 0.49f, 0.70f, 0.83f),
+            new ColorOption("Blue", 0.25f, 0.42f, 0.70f),  new ColorOption("Navy", 0.14f, 0.20f, 0.36f),
+            new ColorOption("Purple", 0.42f, 0.25f, 0.50f), new ColorOption("Grey", 0.55f, 0.55f, 0.55f),
+            new ColorOption("Charcoal", 0.25f, 0.25f, 0.27f), new ColorOption("Black", 0.10f, 0.10f, 0.11f),
+        };
+        static readonly ColorOption[] LeatherPalette =
+        {
+            new ColorOption("Tan", 0.62f, 0.45f, 0.30f),   new ColorOption("Brown", 0.42f, 0.29f, 0.20f),
+            new ColorOption("Dark brown", 0.28f, 0.19f, 0.13f), new ColorOption("Red-brown", 0.48f, 0.22f, 0.16f),
+            new ColorOption("Black", 0.12f, 0.11f, 0.10f), new ColorOption("Grey", 0.40f, 0.38f, 0.36f),
+            new ColorOption("Olive", 0.36f, 0.36f, 0.24f),
+        };
+        static readonly ColorOption[] MetalPalette =
+        {
+            new ColorOption("Steel", 0.63f, 0.62f, 0.56f), new ColorOption("Iron", 0.45f, 0.46f, 0.48f),
+            new ColorOption("Bronze", 0.60f, 0.42f, 0.25f), new ColorOption("Brass", 0.72f, 0.58f, 0.28f),
+            new ColorOption("Gold", 0.85f, 0.68f, 0.25f),  new ColorOption("Silver", 0.78f, 0.80f, 0.82f),
+            new ColorOption("Black iron", 0.20f, 0.20f, 0.22f),
+        };
+        static readonly ColorOption[] HairPalette =
+        {
+            new ColorOption("Black", 0.10f, 0.09f, 0.08f), new ColorOption("Dark brown", 0.22f, 0.15f, 0.10f),
+            new ColorOption("Brown", 0.36f, 0.24f, 0.15f), new ColorOption("Chestnut", 0.45f, 0.28f, 0.16f),
+            new ColorOption("Auburn", 0.52f, 0.24f, 0.14f), new ColorOption("Red", 0.62f, 0.22f, 0.12f),
+            new ColorOption("Ginger", 0.75f, 0.40f, 0.18f), new ColorOption("Blond", 0.80f, 0.65f, 0.40f),
+            new ColorOption("Light blond", 0.89f, 0.78f, 0.55f), new ColorOption("Platinum", 0.90f, 0.86f, 0.75f),
+            new ColorOption("Grey", 0.58f, 0.58f, 0.58f),  new ColorOption("White", 0.88f, 0.88f, 0.86f),
+        };
+        static readonly ColorOption[] SkinPalette =
+        {
+            new ColorOption("Pale", 0.96f, 0.84f, 0.74f),  new ColorOption("Fair", 1.00f, 0.80f, 0.68f),
+            new ColorOption("Light", 0.90f, 0.72f, 0.58f), new ColorOption("Tan", 0.80f, 0.62f, 0.46f),
+            new ColorOption("Olive", 0.72f, 0.55f, 0.40f), new ColorOption("Brown", 0.58f, 0.40f, 0.28f),
+            new ColorOption("Dark brown", 0.42f, 0.28f, 0.18f), new ColorOption("Deep", 0.28f, 0.18f, 0.12f),
+        };
+
+        // Skin before hair: the stubble tint is blended from the hair color toward the skin already set.
+        public static readonly ColorSlot[] ColorSlots = new[]
+        {
+            new ColorSlot("c_skin", "Skin", new[] { "_Color_Skin", "_Color_Scar" }, SkinPalette,
+                (m, c) => { SetColor(m, "_Color_Skin", c); SetColor(m, "_Color_Scar", new Color(c.r * 0.95f, c.g * 0.72f, c.b * 0.66f)); }),
+            new ColorSlot("c_hair", "Hair color", new[] { "_Color_Hair", "_Color_Stubble" }, HairPalette,
+                (m, c) =>
+                {
+                    SetColor(m, "_Color_Hair", c);
+                    var skin = m.HasProperty("_Color_Skin") ? m.GetColor("_Color_Skin") : c;
+                    SetColor(m, "_Color_Stubble", Color.Lerp(c, skin, 0.5f));
+                }),
+            new ColorSlot("c_primary", "Cloth", new[] { "_Color_Primary" }, ClothPalette,
+                (m, c) => SetColor(m, "_Color_Primary", c)),
+            new ColorSlot("c_secondary", "Trim", new[] { "_Color_Secondary" }, ClothPalette,
+                (m, c) => SetColor(m, "_Color_Secondary", c)),
+            new ColorSlot("c_leather", "Leather", new[] { "_Color_Leather_Primary", "_Color_Leather_Secondary" }, LeatherPalette,
+                (m, c) => { SetColor(m, "_Color_Leather_Primary", c); SetColor(m, "_Color_Leather_Secondary", Scale(c, 1.2f)); }),
+            new ColorSlot("c_metal", "Metal", new[] { "_Color_Metal_Primary", "_Color_Metal_Secondary", "_Color_Metal_Dark" }, MetalPalette,
+                (m, c) => { SetColor(m, "_Color_Metal_Primary", c); SetColor(m, "_Color_Metal_Secondary", Scale(c, 0.8f)); SetColor(m, "_Color_Metal_Dark", Scale(c, 0.45f)); }),
+        };
+
+        public static int ColorSlotCount { get { return ColorSlots.Length; } }
+
+        static Color Scale(Color c, float k) { return new Color(Mathf.Clamp01(c.r * k), Mathf.Clamp01(c.g * k), Mathf.Clamp01(c.b * k), 1f); }
+
+        /// <summary>Write RGB, keeping the alpha the material already had: on this shader some alphas gate an effect.</summary>
+        static void SetColor(Material m, string prop, Color c)
+        {
+            if (!m.HasProperty(prop)) return;
+            var old = m.GetColor(prop);
+            m.SetColor(prop, new Color(c.r, c.g, c.b, old.a));
+        }
+
+        /// <summary>The palette entry name for the screen. 0 is described by the nearest palette entry.</summary>
+        public static string DescribeColor(int colorSlot, int value)
+        {
+            if (colorSlot < 0 || colorSlot >= ColorSlots.Length) return "";
+            var p = ColorSlots[colorSlot].Palette;
+            if (value <= 0 || value > p.Length)
+            {
+                int near = NearestPaletteIndex(colorSlot);
+                return near > 0 ? p[near - 1].Name : "Default";
+            }
+            return p[value - 1].Name;
+        }
+
+        /// <summary>
+        /// The palette entry closest to what the cloned NPC wears in this slot, 1-based; 0 if that cannot be
+        /// known yet. The screen resolves a 0 to this so the player always sees a named color and steps
+        /// from where they actually are, and a 0 in a saved string still means the NPC's exact colors.
+        /// </summary>
+        public static int NearestPaletteIndex(int colorSlot)
+        {
+            if (colorSlot < 0 || colorSlot >= ColorSlots.Length) return 0;
+            var slot = ColorSlots[colorSlot];
+            var m = BodyTemplate.SharedMaterial;
+            if (m == null || slot.Props.Length == 0 || !m.HasProperty(slot.Props[0])) return 0;
+            var c = m.GetColor(slot.Props[0]);
+            int best = 0; float bestD = float.MaxValue;
+            for (int i = 0; i < slot.Palette.Length; i++)
+            {
+                var q = slot.Palette[i].Color;
+                float d = (q.r - c.r) * (q.r - c.r) + (q.g - c.g) * (q.g - c.g) + (q.b - c.b) * (q.b - c.b);
+                if (d < bestD) { bestD = d; best = i + 1; }
+            }
+            return best;
+        }
+
         /// <summary>Per-slot chosen index. Null/short arrays are treated as all-zero (the default sailor).</summary>
         public byte[] Values;
 
+        /// <summary>Per-color-slot palette index, 0 = as the cloned NPC wears it. Null/short = all zero.</summary>
+        public byte[] Colors;
+
+        public byte GetColor(int i)
+        {
+            return (Colors != null && i >= 0 && i < Colors.Length) ? Colors[i] : (byte)0;
+        }
+
+        public void SetColor(int i, byte value)
+        {
+            if (Colors == null || Colors.Length < ColorSlots.Length)
+            {
+                var next = new byte[ColorSlots.Length];
+                if (Colors != null) Array.Copy(Colors, next, Math.Min(Colors.Length, next.Length));
+                Colors = next;
+            }
+            if (i >= 0 && i < Colors.Length) Colors[i] = value;
+        }
+
         public static PlayerAppearance Default()
         {
-            return new PlayerAppearance { Values = new byte[Slots.Length] };
+            return new PlayerAppearance { Values = new byte[Slots.Length], Colors = new byte[ColorSlots.Length] };
         }
 
         public byte this[int i]
@@ -223,6 +381,51 @@ namespace SailwindPlayerModel
             SetLimb(c, g.arm_Lower_Left,  torso, v => { if (c.isFemale) c.femaleArm_Lower_Left  = v; else c.maleArm_Lower_Left  = v; });
             SetLimb(c, g.hand_Right,      torso, v => { if (c.isFemale) c.femaleHand_Right      = v; else c.maleHand_Right      = v; });
             SetLimb(c, g.hand_Left,       torso, v => { if (c.isFemale) c.femaleHand_Left       = v; else c.maleHand_Left       = v; });
+        }
+
+        /// <summary>
+        /// Clamp every selection index on the customizer into the range of the list it indexes. The fields
+        /// and lists pair up by name (maleTorso / male.torso, allGenderAll_Hair / allGender.all_Hair), so
+        /// this covers fields this mod never heard of, which is the point: it is the guard for a rig whose
+        /// part library differs from the one the mod was written against. The body groups (male, female)
+        /// are indexed unguarded by vanilla, so they are never left below zero; the allGender accessories
+        /// are guarded and -1 stays legal there.
+        /// </summary>
+        private static void SanitizeIndices(CharacterCustomizer c)
+        {
+            SanitizeGroup(c, "male", c.male, false);
+            SanitizeGroup(c, "female", c.female, false);
+            SanitizeGroup(c, "allGender", c.allGender, true);
+        }
+
+        private static void SanitizeGroup(CharacterCustomizer c, string prefix, object group, bool allowsNone)
+        {
+            if (group == null) return;
+            var gt = group.GetType();
+            foreach (var f in typeof(CharacterCustomizer).GetFields(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (f.FieldType != typeof(int) || !f.Name.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                string rest = f.Name.Substring(prefix.Length);
+                if (rest.Length == 0) continue;
+                string listName = char.ToLowerInvariant(rest[0]) + rest.Substring(1);
+                var lf = gt.GetField(listName, BindingFlags.Public | BindingFlags.Instance);
+                if (lf == null) continue;
+                var list = lf.GetValue(group) as List<GameObject>;
+                int count = list != null ? list.Count : 0;
+                int v = (int)f.GetValue(c);
+                int nv = v;
+                if (count == 0) { if (allowsNone) nv = -1; }        // nothing to index; vanilla throws either way on a body group
+                else if (v >= count) nv = count - 1;
+                else if (v < 0 && !allowsNone) nv = 0;
+                if (nv != v)
+                {
+                    f.SetValue(c, nv);
+                    // The alternate head group is pinned to -1 on purpose and only indexed when its flag is
+                    // set, so that one is routine; anything else is worth a line.
+                    if (!f.Name.EndsWith("HeadNoElements", StringComparison.Ordinal))
+                        Plugin.Log.LogInfo($"[PlayerModel] {f.Name} {v} is out of range for {count} part(s); using {nv}");
+                }
+            }
         }
 
         private static void SetLimb(CharacterCustomizer c, List<GameObject> list, int preferred, Action<int> set)
@@ -332,6 +535,14 @@ namespace SailwindPlayerModel
                 // machine's cloned shopkeeper happened to be wearing - so the same appearance string would
                 // render differently on every client, which defeats the point of syncing it at all.
                 PinUnexposedGroups(c);
+
+                // Last: make every index legal for THIS rig. Vanilla's UpdateModel indexes the body groups
+                // unguarded, and the moment one throws, every part after it never activates and the body is
+                // left at Start's bare defaults. A rig with a different part library (another NPC prefab, a
+                // game update) must never be able to do that.
+                SanitizeIndices(c);
+
+                ApplyColors(c);
             }
             catch (Exception e)
             {
@@ -379,6 +590,52 @@ namespace SailwindPlayerModel
             }
         }
 
+        /// <summary>
+        /// The material this body's parts wear, private to this body. Null when colors cannot be applied:
+        /// the template never got its own copy, so writing would recolor the live NPC it was cloned from.
+        /// </summary>
+        private static Material EnsureOwnMaterial(CharacterCustomizer c)
+        {
+            var shared = BodyTemplate.SharedMaterial;
+            if (shared == null || c.mat == null) return null;
+            if (c.mat == shared) c.mat = new Material(shared) { name = shared.name + " (body)" };
+            return c.mat;
+        }
+
+        private void ApplyColors(CharacterCustomizer c)
+        {
+            var mat = EnsureOwnMaterial(c);
+            if (mat == null) return;
+            var src = BodyTemplate.SharedMaterial;
+            for (int i = 0; i < ColorSlots.Length; i++)
+            {
+                var slot = ColorSlots[i];
+                int v = GetColor(i);
+                if (v <= 0 || v > slot.Palette.Length)
+                {
+                    // As cloned: put back what the NPC wears, so stepping back to 0 is not "keep the last pick".
+                    foreach (var p in slot.Props)
+                        if (mat.HasProperty(p) && src.HasProperty(p)) mat.SetColor(p, src.GetColor(p));
+                    continue;
+                }
+                slot.Write(mat, slot.Palette[v - 1].Color);
+            }
+        }
+
+        /// <summary>Destroy a body's private material when the body goes. Safe to call on anything.</summary>
+        public static void ReleaseOwnedMaterial(GameObject bodyClone)
+        {
+            if (bodyClone == null) return;
+            var c = bodyClone.GetComponentInChildren<CharacterCustomizer>(true);
+            if (c == null || c.mat == null) return;
+            // Only a copy this code made. Never the template's, and never a live NPC's.
+            if (c.mat != BodyTemplate.SharedMaterial && c.mat.name.EndsWith(" (body)", StringComparison.Ordinal))
+            {
+                UnityEngine.Object.Destroy(c.mat);
+                c.mat = null;
+            }
+        }
+
         // ---- persistence / wire ------------------------------------------------------------------------
         // Format: "key=value;key=value". KEY-ADDRESSED on purpose rather than positional, so adding a slot
         // in a later version cannot silently reinterpret an existing player's saved choices as a different
@@ -392,6 +649,8 @@ namespace SailwindPlayerModel
                 if (sb.Length > 0) sb.Append(';');
                 sb.Append(Slots[i].Key).Append('=').Append(this[i]);
             }
+            for (int i = 0; i < ColorSlots.Length; i++)
+                sb.Append(';').Append(ColorSlots[i].Key).Append('=').Append(GetColor(i));
             return sb.ToString();
         }
 
@@ -403,6 +662,8 @@ namespace SailwindPlayerModel
             {
                 var index = new Dictionary<string, int>(StringComparer.Ordinal);
                 for (int i = 0; i < Slots.Length; i++) index[Slots[i].Key] = i;
+                var colorIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+                for (int i = 0; i < ColorSlots.Length; i++) colorIndex[ColorSlots[i].Key] = i;
 
                 foreach (var pair in s.Split(';'))
                 {
@@ -410,10 +671,11 @@ namespace SailwindPlayerModel
                     int eq = pair.IndexOf('=');
                     if (eq <= 0 || eq >= pair.Length - 1) continue;
                     var key = pair.Substring(0, eq).Trim();
-                    int slot;
-                    if (!index.TryGetValue(key, out slot)) continue; // slot from a newer build: ignore
                     int v;
                     if (!int.TryParse(pair.Substring(eq + 1).Trim(), out v)) continue;
+                    int slot;
+                    if (colorIndex.TryGetValue(key, out slot)) { a.SetColor(slot, (byte)Mathf.Clamp(v, 0, 255)); continue; }
+                    if (!index.TryGetValue(key, out slot)) continue; // slot from a newer build: ignore
                     a[slot] = (byte)Mathf.Clamp(v, 0, 255);
                 }
             }
@@ -442,6 +704,14 @@ namespace SailwindPlayerModel
                 ulong h = steamId * (0x9E3779B97F4A7C15UL + ((ulong)i * 2654435761UL));
                 h ^= h >> 29;
                 a[i] = (byte)(h % 251); // clamped down to the live count at Apply time
+            }
+            // Skin, hair, cloth and trim get a seeded pick too, so a crew is not all in the port's colors.
+            // Leather and metal stay as cloned; they read fine on anyone.
+            for (int i = 0; i < 4 && i < ColorSlots.Length; i++)
+            {
+                ulong h = steamId * (0xD6E8FEB86659FD93UL + ((ulong)(i + 1) * 2246822519UL));
+                h ^= h >> 31;
+                a.SetColor(i, (byte)(1 + (int)(h % (ulong)ColorSlots[i].Palette.Length)));
             }
             return a;
         }

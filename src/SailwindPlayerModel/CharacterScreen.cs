@@ -37,6 +37,9 @@ namespace SailwindPlayerModel
         private static PlayerAppearance _working;     // edited copy; only committed on Done
         private static GUIStyle _panel, _title, _label, _button, _small;
         private static Texture2D _panelTex, _titleTex;
+        // One solid texture per (color slot, value), so the swatches are not re-baked every frame.
+        private static readonly System.Collections.Generic.Dictionary<string, Texture2D> _swatches =
+            new System.Collections.Generic.Dictionary<string, Texture2D>();
 
         public static bool IsOpen { get { return _open; } }
 
@@ -88,6 +91,14 @@ namespace SailwindPlayerModel
                     {
                         int n = PlayerAppearance.VariantCount(c0, i);
                         if (n > 0) _working[i] = PlayerAppearance.NormalizeValue(i, n, _working[i]);
+                    }
+                // Colors saved as 0 mean "the NPC's own"; show them as the nearest named color so every row
+                // reads as a choice and stepping starts from where the player actually is.
+                for (int i = 0; i < PlayerAppearance.ColorSlotCount; i++)
+                    if (_working.GetColor(i) == 0)
+                    {
+                        int near = PlayerAppearance.NearestPaletteIndex(i);
+                        if (near > 0) _working.SetColor(i, (byte)near);
                     }
                 _dirty = false;
                 _scroll = Vector2.zero;
@@ -279,6 +290,27 @@ namespace SailwindPlayerModel
                     GUILayout.EndHorizontal();
                 }
 
+                GUILayout.Space(10f);
+                for (int i = 0; i < PlayerAppearance.ColorSlotCount; i++)
+                {
+                    var slot = PlayerAppearance.ColorSlots[i];
+                    int v = _working.GetColor(i);
+
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label(slot.Label, _label, GUILayout.Width(130f));
+
+                    if (GUILayout.Button("<", _button, GUILayout.Width(34f))) StepColor(i, -1);
+                    var sw = Swatch(i, v);
+                    var r = GUILayoutUtility.GetRect(20f, 20f, GUILayout.Width(20f), GUILayout.Height(20f));
+                    if (sw != null) GUI.DrawTexture(new Rect(r.x, r.y + 2f, 20f, 16f), sw);
+                    GUILayout.Space(4f);
+                    GUILayout.Label(PlayerAppearance.DescribeColor(i, v), _label, GUILayout.Width(90f));
+                    if (GUILayout.Button(">", _button, GUILayout.Width(34f))) StepColor(i, +1);
+
+                    GUILayout.FlexibleSpace();
+                    GUILayout.EndHorizontal();
+                }
+
                 GUILayout.EndScrollView();
             }
 
@@ -298,6 +330,8 @@ namespace SailwindPlayerModel
                     // actually allow it can come out empty - a randomized character is never headless.
                     if (n > 0) _working[i] = PlayerAppearance.NormalizeValue(i, n, Random.Range(0, n + 1));
                 }
+                for (int i = 0; i < PlayerAppearance.ColorSlotCount; i++)
+                    _working.SetColor(i, (byte)Random.Range(1, PlayerAppearance.ColorSlots[i].Palette.Length + 1));
                 _dirty = true;
                 Preview();
             }
@@ -320,6 +354,41 @@ namespace SailwindPlayerModel
             // left a floating head, None on Head made the player disappear outright.
             int v = _working[slot];
             return v == 0 ? "None" : v + " / " + count;
+        }
+
+        /// <summary>Cycle a color slot through its palette, wrapping at both ends.</summary>
+        private static void StepColor(int slot, int dir)
+        {
+            int n = PlayerAppearance.ColorSlots[slot].Palette.Length;
+            int cur = _working.GetColor(slot);
+            if (cur <= 0) cur = PlayerAppearance.NearestPaletteIndex(slot);
+            int v = ((cur - 1 + dir) % n + n) % n + 1;   // 1..n, wrapping
+            _working.SetColor(slot, (byte)v);
+            _dirty = true;
+            Preview();
+        }
+
+        /// <summary>
+        /// A solid swatch for a color slot's current value. For "as cloned" it reads the template's material,
+        /// so the player sees what 0 means on this machine. Null if that cannot be known yet.
+        /// </summary>
+        private static Texture2D Swatch(int slot, int value)
+        {
+            var cs = PlayerAppearance.ColorSlots[slot];
+            Color c;
+            if (value > 0 && value <= cs.Palette.Length) c = cs.Palette[value - 1].Color;
+            else
+            {
+                var m = BodyTemplate.SharedMaterial;
+                if (m == null || cs.Props.Length == 0 || !m.HasProperty(cs.Props[0])) return null;
+                c = m.GetColor(cs.Props[0]);
+            }
+            string key = cs.Key + "/" + value;
+            Texture2D t;
+            if (_swatches.TryGetValue(key, out t) && t != null) return t;
+            t = SailwindSkin.SolidTexture(new Color(c.r, c.g, c.b, 1f));
+            _swatches[key] = t;
+            return t;
         }
 
         private static void Step(int slot, int dir, int count)
