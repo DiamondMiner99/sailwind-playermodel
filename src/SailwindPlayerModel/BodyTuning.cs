@@ -28,9 +28,12 @@ namespace SailwindPlayerModel
         public static ConfigEntry<float> LookPitchMaxDeg { get; private set; }
         public static ConfigEntry<string> Appearance { get; private set; }
         public static ConfigEntry<float> MenuButtonScale { get; private set; }
+        public static ConfigEntry<bool> SwimAnimation { get; private set; }
 
         public static void Bind(ConfigFile cfg)
         {
+            SwimAnimation = cfg.Bind(SecPose, "SwimAnimation", false,
+                "Unfinished, off by default. Swim with a stroke and a kick instead of standing upright in the water.");
             // The crouch is a SQUAT: the body drops and 2-bone leg IK re-plants the feet at their standing
             // spot. Everything here is applied times the 0..1 crouch amount.
             CrouchDropMeters = cfg.Bind(SecPose, "CrouchDropMeters", 0.6f,

@@ -83,6 +83,94 @@ namespace SailwindPlayerModel
             if (LocalBody.Instance != null) LocalBody.Instance.ForcedVisible = on;
         }
 
+        /// <summary>
+        /// The control the local player is operating right now: the ship's wheel (<see cref="InteractionKind.Helm"/>),
+        /// a rope winch or bilge pump (<see cref="InteractionKind.Crank"/>), or a sail pusher
+        /// (<see cref="InteractionKind.Push"/>). None otherwise, with <paramref name="control"/> null. Read from
+        /// the game's own pointer, so it works in first person as well as in the orbit camera.
+        ///
+        /// Co-op sends this to the crew. Carried items and mooring ropes are not reported here because they
+        /// already have their own sync; feed those to a body with <see cref="SyntyBody.SetHeldItemPose"/> and
+        /// <see cref="SyntyBody.SetInteraction"/>.
+        /// </summary>
+        public static InteractionKind GetLocalControl(out Transform control)
+        {
+            control = null;
+            Transform target;
+            PickupableItem held;
+            var kind = LocalInteraction.Sample(out target, out held);
+            if (kind != InteractionKind.Helm && kind != InteractionKind.Crank && kind != InteractionKind.Push)
+                return InteractionKind.None;
+            control = target;
+            return kind;
+        }
+
+        /// <summary>
+        /// Whether the local player is sitting, and where: the hip joints, the facing, where the legs go, and the
+        /// height of the floor under the feet. Co-op sends this to the crew; feed it to a body with
+        /// <see cref="SyntyBody.SetSeat"/>.
+        /// </summary>
+        public static bool TryGetLocalSeat(out Vector3 hipsWorld, out Vector3 forwardWorld, out SeatPose pose, out float floorWorldY)
+        {
+            return Seating.TryGetSeat(out hipsWorld, out forwardWorld, out pose, out floorWorldY);
+        }
+
+        /// <summary>
+        /// Whether the local player is lying in one of the game's beds, and where: the head, the direction the
+        /// feet point, and the direction the chest faces. Feed it to a body with <see cref="SyntyBody.SetLying"/>.
+        /// </summary>
+        public static bool TryGetLocalLying(out Vector3 headWorld, out Vector3 alongWorld, out Vector3 upWorld)
+        {
+            return Seating.TryGetLying(out headWorld, out alongWorld, out upWorld);
+        }
+
+        /// <summary>
+        /// Knock the local player off their feet. The body really falls, with the view riding it, onto whatever is
+        /// under it, lies there for <paramref name="seconds"/> after landing, and gets up where it landed.
+        /// <paramref name="impulse"/> is the push in meters per second, in world space as the deck is drawn, pointing the
+        /// way the body should go; about 3 is a hard shove. Called again while already down, the body is pushed again
+        /// and stays down at least that long. Returns false, with the reason logged, when the player cannot fall right
+        /// now (in a menu, in bed, swimming, the shipyard, or no room to fall).
+        /// </summary>
+        public static bool GoDown(DownedReason reason, Vector3 impulse, float seconds)
+        {
+            return Downed.Instance != null && Downed.Instance.GoDown(reason, impulse, seconds);
+        }
+
+        /// <summary>True while the local player is knocked down, from going over until they start getting up.</summary>
+        public static bool IsLocalDowned { get { return Downed.IsDown; } }
+
+        /// <summary>
+        /// The local player's ragdoll while down: the pelvis, each part's rotation in <see cref="RagdollPart"/> order
+        /// (<paramref name="rotationsWorld"/> must be at least <see cref="SyntyBody.RagdollParts"/> long), about where the
+        /// floor is under it, and what the arms are doing. Co-op sends this to the crew; feed it to a body with
+        /// <see cref="SyntyBody.SetRagdoll"/>.
+        /// </summary>
+        public static bool TryGetLocalRagdoll(out Vector3 pelvisWorld, Quaternion[] rotationsWorld, out float floorWorldY, out FallReaction reaction)
+        {
+            return Downed.TryGetRagdoll(out pelvisWorld, rotationsWorld, out floorWorldY, out reaction);
+        }
+
+        /// <summary>
+        /// How far through getting back up the local player is, 0 to 1. Feed it to a body with
+        /// <see cref="SyntyBody.SetGettingUp"/>, after the ragdoll pose it gets up from.
+        /// </summary>
+        public static bool TryGetLocalGettingUp(out float progress01)
+        {
+            return Downed.TryGetGettingUp(out progress01);
+        }
+
+        /// <summary>
+        /// Smoke, flames and steam (each 0 to 1) coming off the local player's pants from sitting on a lit stove too
+        /// long. All zero almost always. Feed them to a body with <see cref="SyntyBody.SetScorch"/>.
+        /// </summary>
+        public static void GetLocalScorch(out float smoke01, out float fire01, out float steam01)
+        {
+            smoke01 = Seating.Smoke01;
+            fire01 = Seating.Fire01;
+            steam01 = Seating.Steam01;
+        }
+
         // ---- appearance ---------------------------------------------------------------------------------
 
         private static PlayerAppearance _localAppearance;

@@ -25,32 +25,14 @@ namespace SailwindPlayerModel
         private const string Section = "2. Held Tool";
 
         public static ConfigEntry<HeldPoseMode> Mode { get; private set; }
-        public static ConfigEntry<float> HoldDistance { get; private set; }
-        public static ConfigEntry<float> HoldDrop { get; private set; }
-        public static ConfigEntry<float> HoldSide { get; private set; }
         public static ConfigEntry<float> ElbowDown { get; private set; }
         public static ConfigEntry<float> ElbowOut { get; private set; }
         public static ConfigEntry<float> BlendSpeed { get; private set; }
-        public static ConfigEntry<float> GripX { get; private set; }
-        public static ConfigEntry<float> GripY { get; private set; }
-        public static ConfigEntry<float> GripZ { get; private set; }
-        public static ConfigEntry<float> GripPitch { get; private set; }
-        public static ConfigEntry<float> GripYaw { get; private set; }
-        public static ConfigEntry<float> GripRoll { get; private set; }
 
         public static void Bind(ConfigFile cfg)
         {
             Mode = cfg.Bind(Section, "Mode", HeldPoseMode.ItemInHand,
-                "How a body shows what it holds. ItemInHand: the item sits in the right hand, aimed where the holder aims it. HandReachesItem: the arm reaches for the item where it really floats. Off: no arm pose.");
-            HoldDistance = cfg.Bind(Section, "HoldDistance", 0.45f,
-                new ConfigDescription("ItemInHand: how far in front of the head the hand goes, along the direction the holder is aiming (meters).",
-                    new AcceptableValueRange<float>(0.1f, 0.9f)));
-            HoldDrop = cfg.Bind(Section, "HoldDrop", -0.2f,
-                new ConfigDescription("ItemInHand: hand height relative to that aim point (meters; negative = lower).",
-                    new AcceptableValueRange<float>(-0.6f, 0.3f)));
-            HoldSide = cfg.Bind(Section, "HoldSide", 0.12f,
-                new ConfigDescription("ItemInHand: sideways hand offset (meters; positive = toward the holder's right).",
-                    new AcceptableValueRange<float>(-0.4f, 0.4f)));
+                "How a body shows what it holds. ItemInHand: the item is drawn in the hands, held the way that item is held (see 6. Item Poses). HandReachesItem: the item stays where the game floats it and the hands reach for it. Off: no arm pose.");
             ElbowDown = cfg.Bind(Section, "ElbowDown", 1.0f,
                 new ConfigDescription("Elbow direction: how strongly the elbow points down.",
                     new AcceptableValueRange<float>(-1f, 2f)));
@@ -60,24 +42,6 @@ namespace SailwindPlayerModel
             BlendSpeed = cfg.Bind(Section, "BlendSpeed", 8f,
                 new ConfigDescription("How fast the arm raises into the hold pose and drops out of it.",
                     new AcceptableValueRange<float>(1f, 30f)));
-            GripX = cfg.Bind(Section, "GripX", 0f,
-                new ConfigDescription("ItemInHand: item offset from the hand along the item's own X axis (meters).",
-                    new AcceptableValueRange<float>(-0.4f, 0.4f)));
-            GripY = cfg.Bind(Section, "GripY", 0f,
-                new ConfigDescription("ItemInHand: item offset from the hand along the item's own Y axis (meters).",
-                    new AcceptableValueRange<float>(-0.4f, 0.4f)));
-            GripZ = cfg.Bind(Section, "GripZ", 0f,
-                new ConfigDescription("ItemInHand: item offset from the hand along the item's own Z axis (meters).",
-                    new AcceptableValueRange<float>(-0.4f, 0.4f)));
-            GripPitch = cfg.Bind(Section, "GripPitch", 0f,
-                new ConfigDescription("ItemInHand: extra item rotation about its X axis (degrees).",
-                    new AcceptableValueRange<float>(-180f, 180f)));
-            GripYaw = cfg.Bind(Section, "GripYaw", 0f,
-                new ConfigDescription("ItemInHand: extra item rotation about its Y axis (degrees).",
-                    new AcceptableValueRange<float>(-180f, 180f)));
-            GripRoll = cfg.Bind(Section, "GripRoll", 0f,
-                new ConfigDescription("ItemInHand: extra item rotation about its Z axis (degrees).",
-                    new AcceptableValueRange<float>(-180f, 180f)));
         }
     }
 
@@ -87,6 +51,12 @@ namespace SailwindPlayerModel
     /// and each bone turned so its captured bone-to-child LOCAL aim axis points at its solved target, so
     /// nothing depends on the rig's local axis conventions. A reach-limited target is clamped onto the arm's
     /// sphere instead of snapping or over-extending.
+    ///
+    /// THE TARGET IS THE PALM, NOT THE WRIST. The Synty hand bone sits at the wrist and the palm is about
+    /// 7 cm further along the fingers, so solving the wrist onto a handle left the hand hanging past it. The
+    /// palm offset and the hand's own axes (fingers toward the knuckles, palm normal toward the finger curl)
+    /// are captured from the finger bones, and the hand is turned to the grip's orientation after the arm
+    /// is solved.
     /// </summary>
     public sealed class ArmIk
     {
@@ -95,8 +65,21 @@ namespace SailwindPlayerModel
         private Vector3 _upperAimLocal, _foreAimLocal;
         private float _weight;
 
+        // Hand frame, in the hand bone's local space.
+        private Vector3 _fingerLocal = Vector3.right;
+        private Vector3 _palmNormalLocal = Vector3.up;
+        private Vector3 _knuckleLocal = Vector3.forward;   // index knuckle toward little finger, across the fist
+        private Vector3 _palmLocal;
+        private float _axisSign = 1f;                       // which way round a bar the fist last closed
+
         public bool Ready { get; private set; }
         public Transform Hand { get { return _hand; } }
+        /// <summary>The eased blend actually applied last solve: 0 = walk pose, 1 = on target.</summary>
+        public float Weight { get { return _weight; } }
+        /// <summary>Shoulder to wrist at full extension, in world units. 0 before capture.</summary>
+        public float Length { get { return Ready ? _upperLen + _foreLen : 0f; } }
+        /// <summary>Where the palm center is right now, in world space.</summary>
+        public Vector3 PalmPosition { get { return _hand != null ? _hand.TransformPoint(_palmLocal) : Vector3.zero; } }
 
         /// <summary>
         /// Capture bone lengths and aim axes. The aim axes are the child's direction in the bone's own frame,
@@ -117,22 +100,174 @@ namespace SailwindPlayerModel
             _upperAimLocal = upper.InverseTransformDirection(u / _upperLen);
             _foreAimLocal = fore.InverseTransformDirection(f / _foreLen);
             _weight = 0f;
+            CaptureHandFrame(f / _foreLen);
             Ready = true;
             return true;
         }
 
         /// <summary>
-        /// Blend the arm toward the target by an eased weight (1 = on target, 0 = the gait pose untouched).
-        /// While releasing, keep passing the last target so the arm lowers along the same path.
+        /// Find the palm from the finger bones: the knuckles are the first joint of the middle-finger group and
+        /// of the index finger, and the fingers curl toward the palm. Falls back to "fingers continue the
+        /// forearm, palm 7 cm out" on a rig without finger bones.
         /// </summary>
+        private void CaptureHandFrame(Vector3 forearmDirWorld)
+        {
+            Transform f1 = null, f2 = null, index1 = null;
+            foreach (Transform c in _hand)
+            {
+                string n = c.name;
+                if (n.StartsWith("Finger_01", System.StringComparison.Ordinal)) { f1 = c; if (c.childCount > 0) f2 = c.GetChild(0); }
+                else if (n.StartsWith("IndexFinger_01", System.StringComparison.Ordinal)) index1 = c;
+            }
+            if (f1 != null && index1 != null && f2 != null)
+            {
+                Vector3 k1 = _hand.InverseTransformPoint(f1.position);
+                Vector3 ki = _hand.InverseTransformPoint(index1.position);
+                Vector3 knuckles = (k1 + ki) * 0.5f;
+                Vector3 curl = _hand.InverseTransformPoint(f2.position) - k1;
+                if (knuckles.sqrMagnitude > 1e-8f)
+                {
+                    Vector3 finger = knuckles.normalized;
+                    Vector3 n = curl - Vector3.Dot(curl, finger) * finger;
+                    Vector3 across = Vector3.ProjectOnPlane(k1 - ki, finger);
+                    if (n.sqrMagnitude > 1e-10f && across.sqrMagnitude > 1e-10f)
+                    {
+                        _fingerLocal = finger;
+                        _palmNormalLocal = n.normalized;
+                        _knuckleLocal = across.normalized;
+                        // The palm center: most of the way to the knuckles, and a little toward the palm side,
+                        // which is where a gripped handle actually rests.
+                        _palmLocal = knuckles * 0.72f + _palmNormalLocal * (knuckles.magnitude * 0.22f);
+                        return;
+                    }
+                }
+            }
+            _fingerLocal = _hand.InverseTransformDirection(forearmDirWorld).normalized;
+            Vector3 side = Vector3.Cross(_fingerLocal, Vector3.forward);
+            _palmNormalLocal = side.sqrMagnitude > 1e-4f ? side.normalized : Vector3.up;
+            _knuckleLocal = Vector3.Cross(_palmNormalLocal, _fingerLocal).normalized;
+            float scale = Mathf.Max(Mathf.Abs(_hand.lossyScale.x), 1e-4f);
+            _palmLocal = _fingerLocal * (0.07f / scale);
+        }
+
+        /// <summary>
+        /// Turn the hand to hang relaxed off the forearm: fingers on along the arm and a little forward, palm toward
+        /// <paramref name="inward"/> (the body's side). Run every frame before the grip solve. Nothing else resets the
+        /// hand bone, so without this a hand kept whatever turn its last grip gave it after the arm let go, and the
+        /// rig's own rest has the palms facing backward.
+        /// </summary>
+        public void RestHand(Vector3 inward, Vector3 forward)
+        {
+            if (!Ready || _hand == null || _fore == null) return;
+            Vector3 forearm = _hand.position - _fore.position;
+            if (forearm.sqrMagnitude < 1e-8f) return;
+            _hand.rotation = HandRotationFor((forearm.normalized + forward * 0.15f).normalized, inward);
+        }
+
+        /// <summary>The world rotation that puts this hand's fingers along <paramref name="fingerDir"/> with the palm facing <paramref name="palmNormal"/>.</summary>
+        public Quaternion HandRotationFor(Vector3 fingerDir, Vector3 palmNormal)
+        {
+            if (_hand == null || fingerDir.sqrMagnitude < 1e-8f || palmNormal.sqrMagnitude < 1e-8f)
+                return _hand != null ? _hand.rotation : Quaternion.identity;
+            Vector3 n = Vector3.ProjectOnPlane(palmNormal, fingerDir);
+            if (n.sqrMagnitude < 1e-8f) n = Vector3.Cross(fingerDir, Vector3.right);
+            return Quaternion.LookRotation(fingerDir.normalized, n.normalized) * Quaternion.Inverse(Quaternion.LookRotation(_fingerLocal, _palmNormalLocal));
+        }
+
+        /// <summary>Put the wrist on the target and leave the hand as the forearm carries it.</summary>
         public void Solve(Vector3 target, Vector3 poleHint, float weightTarget, float blendSpeed, float dt)
         {
+            SolveWrist(target, poleHint, weightTarget, blendSpeed, dt);
+        }
+
+        /// <summary>
+        /// Put the PALM on <paramref name="palmTarget"/> and close the hand the way the grip asks, with the elbow
+        /// bent toward the pole.
+        ///
+        /// A grip with an <paramref name="axis"/> is a bar, handle or rope running through the fist: the knuckles
+        /// line up with the bar and the fingers wrap round it, and of all the ways round the bar the one nearest
+        /// the forearm is taken, so the wrist stays straight. A grip without one uses
+        /// <paramref name="finger"/> and <paramref name="palmNormal"/> as given.
+        ///
+        /// THE HAND'S ROTATION IS SETTLED BEFORE THE WRIST IS PLACED. The wrist target is the palm target minus the
+        /// palm offset in the hand's final rotation, so a rotation changed afterwards (by the wrist limit) would
+        /// slide the palm off the handle and leave the handle at the wrist. It takes two passes, because the
+        /// rotation depends on the forearm and the forearm on where the wrist goes; the second pass starts from
+        /// the first pass's forearm and lands within a few millimeters.
+        /// </summary>
+        public void SolveGrip(Vector3 palmTarget, Vector3 finger, Vector3 palmNormal, Vector3 axis, Vector3 poleHint,
+            float weightTarget, float blendSpeed, float dt, float maxWristBend)
+        {
             if (!Ready) return;
-            // A rebuilt body (appearance change) destroys these bones before the next capture runs.
             if (_upper == null || _fore == null || _hand == null) { Ready = false; return; }
             _weight = Mathf.Lerp(_weight, weightTarget, 1f - Mathf.Exp(-blendSpeed * dt));
             if (_weight < 0.001f) return;
 
+            Quaternion preUpper = _upper.localRotation;
+            Quaternion preFore = _fore.localRotation;
+            Vector3 scale = _hand.lossyScale;
+
+            Quaternion rot = GripRotation(finger, palmNormal, axis, palmTarget - _upper.position, maxWristBend);
+            for (int pass = 0; pass < 2; pass++)
+            {
+                if (pass > 0) { _upper.localRotation = preUpper; _fore.localRotation = preFore; }
+                SolveBones(palmTarget - rot * Vector3.Scale(_palmLocal, scale), poleHint);
+                rot = GripRotation(finger, palmNormal, axis, _hand.position - _fore.position, maxWristBend);
+            }
+            _hand.rotation = _weight >= 0.999f ? rot : Quaternion.Slerp(_hand.rotation, rot, _weight);
+        }
+
+        private Quaternion GripRotation(Vector3 finger, Vector3 palmNormal, Vector3 axis, Vector3 forearm, float maxWristBend)
+        {
+            Vector3 fa = forearm.sqrMagnitude > 1e-10f ? forearm.normalized : (finger.sqrMagnitude > 1e-10f ? finger.normalized : Vector3.forward);
+            Quaternion rot;
+            if (axis.sqrMagnitude > 1e-8f)
+            {
+                Vector3 a = axis.normalized;
+                Vector3 f = Vector3.ProjectOnPlane(fa, a);
+                if (f.sqrMagnitude < 0.02f && finger.sqrMagnitude > 1e-8f) f = Vector3.ProjectOnPlane(finger, a);
+                if (f.sqrMagnitude < 1e-8f) f = Vector3.Cross(a, Mathf.Abs(a.y) < 0.9f ? Vector3.up : Vector3.right);
+                f.Normalize();
+                // Either way round the bar holds it; keep the one the fist already has unless the other is clearly
+                // closer to how the hand is turned, so a hand does not flip over from one frame to the next.
+                Quaternion same = FrameRotation(f, a * _axisSign);
+                Quaternion other = FrameRotation(f, -a * _axisSign);
+                Quaternion current = _hand.rotation;
+                if (Quaternion.Angle(other, current) + 30f < Quaternion.Angle(same, current)) { _axisSign = -_axisSign; rot = other; }
+                else rot = same;
+            }
+            else
+            {
+                rot = HandRotationFor(finger, palmNormal);
+            }
+
+            Vector3 fingers = rot * _fingerLocal;
+            float bend = Vector3.Angle(fa, fingers);
+            if (bend > maxWristBend && bend > 1e-3f)
+                rot = Quaternion.FromToRotation(fingers, Vector3.Slerp(fa, fingers, maxWristBend / bend)) * rot;
+            return rot;
+        }
+
+        /// <summary>The world rotation that puts the fingers along <paramref name="f"/> and the knuckles along <paramref name="k"/>.</summary>
+        private Quaternion FrameRotation(Vector3 f, Vector3 k)
+        {
+            return Quaternion.LookRotation(f, k) * Quaternion.Inverse(Quaternion.LookRotation(_fingerLocal, _knuckleLocal));
+        }
+
+        private bool SolveWrist(Vector3 target, Vector3 poleHint, float weightTarget, float blendSpeed, float dt)
+        {
+            if (!Ready) return false;
+            // A rebuilt body (appearance change) destroys these bones before the next capture runs.
+            if (_upper == null || _fore == null || _hand == null) { Ready = false; return false; }
+            _weight = Mathf.Lerp(_weight, weightTarget, 1f - Mathf.Exp(-blendSpeed * dt));
+            if (_weight < 0.001f) return false;
+            SolveBones(target, poleHint);
+            return true;
+        }
+
+        /// <summary>Two-bone solve of the wrist onto <paramref name="target"/>, blended from the current pose by the eased weight.</summary>
+        private void SolveBones(Vector3 target, Vector3 poleHint)
+        {
             Quaternion preUpper = _upper.localRotation;
             Quaternion preFore = _fore.localRotation;
 

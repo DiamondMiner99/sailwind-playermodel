@@ -4,3 +4,14 @@ obj/
 
 # release artifacts
 *.zip
+
+# Unity project for the embedded shader bundle (only Assets/ and ProjectSettings/ are source)
+unity/Library/
+unity/Temp/
+unity/Logs/
+unity/Build/
+unity/UserSettings/
+unity/obj/
+unity/*.csproj
+unity/*.sln
+unity/build.log

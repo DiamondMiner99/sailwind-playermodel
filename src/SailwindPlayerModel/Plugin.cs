@@ -22,7 +22,7 @@ namespace SailwindPlayerModel
         public const string PluginName = "Sailwind Player Model";
         // BepInEx 5 parses this as a strict System.Version. No SemVer suffixes, or the plugin silently fails
         // to load with no error.
-        public const string PluginVersion = "0.1.2";
+        public const string PluginVersion = "0.1.3";
 
         public static ManualLogSource Log;
 
@@ -51,7 +51,15 @@ namespace SailwindPlayerModel
 
             BodyTuning.Bind(Config);
             HeldToolPose.Bind(Config);
+            InteractionTuning.Bind(Config);
+            ItemPoseTuning.Bind(Config);
+            SeatingTuning.Bind(Config);
+            CameraTuning.Bind(Config);
+            DownedTuning.Bind(Config);
+            RemoveRetiredSettings();
 
+            gameObject.AddComponent<Seating>();
+            gameObject.AddComponent<Downed>();
             // Always added. The body is only drawn in the ship-orbit camera, which is already something the
             // player chooses to switch to, so there is nothing to opt out of - and it is the only honest
             // source of "how many part variants does THIS machine have", which a character screen needs.
@@ -60,6 +68,48 @@ namespace SailwindPlayerModel
             gameObject.AddComponent<MenuDriver>();
             new HarmonyLib.Harmony(PluginGuid).PatchAll(typeof(PauseMenuPatches).Assembly);
             Log.LogInfo($"{PluginName} {PluginVersion} loaded");
+        }
+
+        /// <summary>
+        /// Settings this mod no longer reads. BepInEx never deletes a line a mod stops binding: it keeps it in a
+        /// private list and writes it back on every save, so a retired setting would stay in the file forever
+        /// looking like it does something. Only these exact names are removed.
+        /// </summary>
+        private void RemoveRetiredSettings()
+        {
+            var retired = new[]
+            {
+                new ConfigDefinition("1. Pose", "ShowOwnBody"),
+                new ConfigDefinition("2. Held Tool", "HoldDistance"),
+                new ConfigDefinition("2. Held Tool", "HoldDrop"),
+                new ConfigDefinition("2. Held Tool", "HoldSide"),
+                new ConfigDefinition("2. Held Tool", "GripX"),
+                new ConfigDefinition("2. Held Tool", "GripY"),
+                new ConfigDefinition("2. Held Tool", "GripZ"),
+                new ConfigDefinition("2. Held Tool", "GripPitch"),
+                new ConfigDefinition("2. Held Tool", "GripYaw"),
+                new ConfigDefinition("2. Held Tool", "GripRoll"),
+                new ConfigDefinition("5. Interactions", "HelmGripRadius"),
+                new ConfigDefinition("5. Interactions", "HelmFollow"),
+                new ConfigDefinition("5. Interactions", "CrankGripRadius"),
+                new ConfigDefinition("5. Interactions", "CrankTwoHands"),
+                new ConfigDefinition("7. Seating", "BodyFadeLength"),
+            };
+            try
+            {
+                var orphans = HarmonyLib.Traverse.Create(Config).Property("OrphanedEntries")
+                    .GetValue<System.Collections.Generic.Dictionary<ConfigDefinition, string>>();
+                if (orphans == null) return;
+                int removed = 0;
+                foreach (var d in retired) if (orphans.Remove(d)) removed++;
+                if (removed == 0) return;
+                Config.Save();
+                Log.LogInfo($"Removed {removed} retired setting(s) from the config file");
+            }
+            catch (Exception e)
+            {
+                Log.LogWarning("Could not remove retired settings from the config file: " + e.Message);
+            }
         }
     }
 }

@@ -36,6 +36,17 @@
     <Reference Include="UnityEngine.AnimationModule">
       <HintPath>$(GameDir)/Sailwind_Data/Managed/UnityEngine.AnimationModule.dll</HintPath>
     </Reference>
+    <!-- The stove's fire, smoke and crackle, copied for a scorched seat (ScorchEffect). -->
+    <Reference Include="UnityEngine.ParticleSystemModule">
+      <HintPath>$(GameDir)/Sailwind_Data/Managed/UnityEngine.ParticleSystemModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(GameDir)/Sailwind_Data/Managed/UnityEngine.AudioModule.dll</HintPath>
+    </Reference>
+    <!-- Loads the embedded shader bundle (BodyShaders). -->
+    <Reference Include="UnityEngine.AssetBundleModule">
+      <HintPath>$(GameDir)/Sailwind_Data/Managed/UnityEngine.AssetBundleModule.dll</HintPath>
+    </Reference>
 
     <Reference Include="Assembly-CSharp">
       <HintPath>$(GameDir)/Sailwind_Data/Managed/Assembly-CSharp.dll</HintPath>
@@ -44,9 +55,19 @@
     <Reference Include="Oculus.VR">
       <HintPath>$(GameDir)/Sailwind_Data/Managed/Oculus.VR.dll</HintPath>
     </Reference>
+    <!-- The sea's height under a falling body (Downed), from the ocean's own sampler. -->
+    <Reference Include="Crest">
+      <HintPath>$(GameDir)/Sailwind_Data/Managed/Crest.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Shaders built by the Unity 2019.1.10f1 project in /unity (BuildShaderBundle), shipped inside the DLL. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\playermodel.shaders" LogicalName="SailwindPlayerModel.playermodel.shaders" />
   </ItemGroup>
 </Project>

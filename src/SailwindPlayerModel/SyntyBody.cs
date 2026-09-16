@@ -61,6 +61,12 @@ namespace SailwindPlayerModel
         /// </summary>
         public Vector3 CrouchOffset { get; private set; }
 
+        /// <summary>
+        /// Where the body sits relative to its planted rest spot, root-local: the crouch drop and setback plus
+        /// the step toward a control it is using. Add it to a name tag's base so the tag stays over the head.
+        /// </summary>
+        public Vector3 BodyOffset { get { return _ixOffset - Quaternion.Euler(0f, _ixYaw, 0f) * CrouchOffset; } }
+
         /// <summary>Claims currently held on this body's bones. See <see cref="PoseStack"/>.</summary>
         public PoseStack Poses { get; private set; }
 
@@ -96,7 +102,7 @@ namespace SailwindPlayerModel
         // ---- rig ---------------------------------------------------------------------------------------
 
         private Transform _bSpine, _bUpperLegL, _bUpperLegR, _bLowerLegL, _bLowerLegR, _bShoulderL, _bShoulderR, _bElbowL, _bElbowR;
-        private Transform _bFootL, _bFootR, _bHandR, _bHead;
+        private Transform _bFootL, _bFootR, _bHandL, _bHandR, _bHead;
         private Quaternion _qSpine, _qUpperLegL, _qUpperLegR, _qLowerLegL, _qLowerLegR, _qShoulderL, _qShoulderR, _qElbowL, _qElbowR;
         // Foot bind LOCAL rotations. The crouch ankle write is an ABSOLUTE world write, so it must reset to
         // these first every frame - otherwise it reads its own previous output and becomes a self-feeding
@@ -106,6 +112,7 @@ namespace SailwindPlayerModel
         public Transform Spine { get { return _bSpine; } }
         public Transform Head { get { return _bHead; } }
         public Transform HandR { get { return _bHandR; } }
+        public Transform HandL { get { return _bHandL; } }
 
         // Crouch leg IK: the body drop lowers the hips, then a per-leg 2-bone IK re-plants each ankle at its
         // captured STANDING world target so the feet stay on the deck at any depth (a squat, not a bow or a
@@ -122,11 +129,82 @@ namespace SailwindPlayerModel
         // Held-tool arm. The item's target pose is handed in each frame and goes STALE after a frame without a
         // refresh, which is how a drop lowers the arm without anyone having to say so.
         private readonly ArmIk _armR = new ArmIk();
+        private readonly ArmIk _armL = new ArmIk();
         private Transform _heldItem, _heldFollower;
-        private Vector3 _heldPos, _armTarget;
+        private Vector3 _heldPos;
         private Quaternion _heldRot = Quaternion.identity;
         private bool _heldBig;
         private int _heldFrame = -10;
+        private Transform _heldView;          // the local player's pointer, when this is the local body
+
+        // Interaction poses (wheel, winch, pump, sail pusher, mooring rope, big items). Handed in each frame like
+        // the held item and stale after a frame without a refresh. The last targets are kept so an arm lowers
+        // along the path it came up on.
+        private InteractionKind _ixKind;
+        private Transform _ixTarget;
+        private int _ixFrame = -10;
+        private Vector3 _ixOffset;           // root-local step toward a control, eased
+        private float _ixYaw;                // degrees the body turns to face a control, eased
+        private Vector3 _shoulderMidRoot;    // root-local shoulder midpoint at the planted rest pose
+        private readonly RotorGrip _rotor = new RotorGrip();
+        private HandGrip _lastGripR, _lastGripL;
+        private ItemPoseResult _itemPose;
+        private bool _itemPoseValid;
+        private float _itemBlend;
+
+        // Sitting and lying, handed in each frame like an interaction and stale after a frame without a refresh.
+        // The last seat is kept so the body rises from where it sat rather than from nowhere.
+        private int _seatFrame = -10, _lieFrame = -10;
+        private Vector3 _seatHips, _seatForward, _lieHead, _lieAlong, _lieUp;
+        private SeatPose _seatPose;
+        private float _seatFloorY;
+        private float _seat01, _lie01;
+        // Turning on the seat (legs swung over a rail, a spar straddled or sat on sideways) is animated here, from
+        // the facing each SetSeat hands in, so a crewmate's body swings round the same way as your own. The legs
+        // tuck up and the hands go down on the seat while it turns.
+        private bool _seatTracking;
+        private float _seatYaw, _seatYawGoal, _seatYawVel, _seatRawYaw;
+        private float _seatNextSign = 1f;
+        private float _tuck, _straddle01;
+        private Vector3 _seatHipsOffset, _lastSeatHipsRel;
+        // Sitting on the floor: how much of each floor pose is showing (legs out, cross-legged, one knee up, knees
+        // hugged), eased, so changing pose moves the legs and arms over rather than jumping.
+        private readonly float[] _floorW = new float[4];
+        private static readonly float[] FloorLean = { -14f, 2f, -6f, 14f };
+        // Knocked down: the bones copy a ragdoll's parts, handed in each frame and stale after a frame without a refresh.
+        // The drawn pose follows the one handed in, so a crewmate's fall arriving a few times a second still moves
+        // smoothly. The last drawn pose is kept: getting up starts from it.
+        private Transform _bPelvis;
+        private Vector3 _pelvisBindPos;
+        private Quaternion _qPelvis = Quaternion.identity, _qHead = Quaternion.identity;
+        private readonly Quaternion[] _ragRot = new Quaternion[RagdollParts];
+        private readonly Quaternion[] _ragDrawn = new Quaternion[RagdollParts];
+        private readonly Quaternion[] _ragBefore = new Quaternion[RagdollParts];
+        private Vector3 _ragPelvis, _ragPelvisDrawn;
+        private float _ragFloorY;
+        private FallReaction _ragReaction;
+        private int _ragFrame = -10;
+        private float _rag01;
+        private bool _ragHasDrawn;
+        private float _coverFace01, _coverHead01, _flail01;
+        // Getting up from a ragdoll, driven by a progress value handed in each frame.
+        private int _getUpFrame = -10;
+        private float _getUpTarget, _getUpShown, _getUp01;
+        private bool _getUpBegun, _guFaceDown;
+        private Vector3 _guPelvis, _guAlong;
+        private float _guFloorY;
+        private Vector3 _guFootL, _guFootR, _guPole, _guHandL, _guHandR;
+        private float _guFootLevel, _guHandW;
+        // Swimming, handed in each frame like sitting: treading water when still, a crawl with a flutter kick when moving,
+        // tipped toward where the player looks when under the surface.
+        private int _swimFrame = -10;
+        private bool _swimUnder;
+        private Vector3 _swimVel;
+        private float _swim01, _swimMove01, _swimPhase, _swimBack, _swimFlat;
+        // The head's and chest's facing and up at the planted rest pose, in their own bones' space.
+        private Vector3 _headFwdLocal = Vector3.forward, _headUpLocal = Vector3.up, _chestFwdLocal = Vector3.forward, _chestUpLocal = Vector3.up;
+        private Vector3 _hipMidRoot;        // root-local hip joint midpoint at the planted rest pose
+        private float _headAboveSoles;      // head bone over the soles at the planted rest pose
 
         // Frame at which to check that vanilla's Start actually dressed the clone. 0 = done.
         private int _dressCheckFrame;
@@ -222,7 +300,18 @@ namespace SailwindPlayerModel
             // Held-tool arm: the hand is the forearm's end effector. Fall back to the forearm's first child.
             _bHandR = BodyTemplate.FindDeep(r, "Hand_R") ?? BodyTemplate.FindDeep(r, "Wrist_R");
             if (_bHandR == null && _bElbowR != null && _bElbowR.childCount > 0) _bHandR = _bElbowR.GetChild(0);
+            _bHandL = BodyTemplate.FindDeep(r, "Hand_L") ?? BodyTemplate.FindDeep(r, "Wrist_L");
+            if (_bHandL == null && _bElbowL != null && _bElbowL.childCount > 0) _bHandL = _bElbowL.GetChild(0);
             _bHead = BodyTemplate.FindDeep(r, "Head");
+            if (_bHead != null) _qHead = _bHead.localRotation;
+            // The hips bone, which both thighs and the spine hang off. A ragdoll moves it; nothing else does.
+            _bPelvis = _bUpperLegL != null ? _bUpperLegL.parent : null;
+            if (_bPelvis != null && _bPelvis != r)
+            {
+                _qPelvis = _bPelvis.localRotation;
+                _pelvisBindPos = _bPelvis.localPosition;
+            }
+            else _bPelvis = null;
 
             // Crouch IK ankle bones (Synty: UpperLeg -> LowerLeg -> Foot). Prefer Foot_L/R, then Ankle_L/R,
             // then the LowerLeg's first child; if none exist the ankle is approximated at capture time.
@@ -269,6 +358,124 @@ namespace SailwindPlayerModel
                 if (_renderers[i] != null) _renderers[i].enabled = on;
         }
 
+        // The chest-down view of your own body in first person (see LocalBody): each renderer's own materials are kept
+        // aside while copies on the fade shader stand in.
+        private Material[][] _fadeSaved;
+        private readonly Dictionary<Material, Material> _fadeCopies = new Dictionary<Material, Material>();
+
+        /// <summary>
+        /// Draw this body for its own eyes: the arms not at all, and the rest with <paramref name="fadeShader"/>
+        /// (SailwindPlayerModel/SeatedBodyFade), solid up to <paramref name="aboveHips"/> meters over the hip joints
+        /// and see-through from <paramref name="belowShoulders"/> meters under the shoulders, fading between. Both
+        /// are measured from the pose every call, so the fade follows a lean. Call every frame while it should show;
+        /// <see cref="ClearChestFade"/> puts the body back as it was.
+        ///
+        /// The arms go because the hands would never match what the eyes see: the game draws a held item framed in
+        /// front of the view, not in the hands.
+        /// </summary>
+        public void SetChestFade(Shader fadeShader, float belowShoulders, float aboveHips)
+        {
+            if (_renderers == null || fadeShader == null) return;
+            bool first = _fadeSaved == null;
+            if (first)
+            {
+                _fadeArms = ArmParts();
+                _fadeSaved = new Material[_renderers.Length][];
+                for (int i = 0; i < _renderers.Length; i++)
+                {
+                    var r = _renderers[i];
+                    if (r == null) continue;
+                    var own = r.sharedMaterials;
+                    _fadeSaved[i] = own;
+                    var swapped = new Material[own.Length];
+                    for (int m = 0; m < own.Length; m++) swapped[m] = FadeCopy(own[m], fadeShader);
+                    r.sharedMaterials = swapped;
+                }
+            }
+            // Every call: whatever shows the body switches all its renderers back on.
+            for (int i = 0; i < _renderers.Length; i++)
+                if (_renderers[i] != null && _fadeArms.Contains(_renderers[i].gameObject)) _renderers[i].enabled = false;
+
+            float shoulders = _bShoulderL != null && _bShoulderR != null
+                ? (_bShoulderL.position.y + _bShoulderR.position.y) * 0.5f
+                : _instance.transform.position.y + MeasuredHeight * 0.8f;
+            float hips = _bUpperLegL != null && _bUpperLegR != null
+                ? (_bUpperLegL.position.y + _bUpperLegR.position.y) * 0.5f
+                : shoulders - 0.5f;
+            float top = shoulders - belowShoulders;
+            float bottom = Mathf.Min(hips + aboveHips, top - 0.05f);
+            foreach (var copy in _fadeCopies.Values)
+            {
+                if (copy == null) continue;
+                copy.SetFloat("_FadeTop", top);
+                copy.SetFloat("_FadeBottom", bottom);
+            }
+            if (first)
+                Plugin.Log.LogInfo($"[PlayerModel] seated first-person body: shoulders y {shoulders:F2}, hips y {hips:F2}, " +
+                    $"solid below {bottom:F2}, gone above {top:F2}; {_fadeCopies.Count} material(s), {_fadeArms.Count} arm part(s) hidden");
+        }
+
+        private HashSet<GameObject> _fadeArms = new HashSet<GameObject>();
+
+        /// <summary>Every arm, hand, shoulder and elbow part the character customizer can put on this body.</summary>
+        private HashSet<GameObject> ArmParts()
+        {
+            var parts = new HashSet<GameObject>();
+            var c = _instance != null ? _instance.GetComponentInChildren<PsychoticLab.CharacterCustomizer>(true) : null;
+            if (c == null) return parts;
+            System.Action<List<GameObject>> add = list => { if (list != null) foreach (var go in list) if (go != null) parts.Add(go); };
+            foreach (var g in new[] { c.male, c.female })
+            {
+                if (g == null) continue;
+                add(g.arm_Upper_Right); add(g.arm_Upper_Left);
+                add(g.arm_Lower_Right); add(g.arm_Lower_Left);
+                add(g.hand_Right); add(g.hand_Left);
+            }
+            if (c.allGender != null)
+            {
+                add(c.allGender.shoulder_Attachment_Right); add(c.allGender.shoulder_Attachment_Left);
+                add(c.allGender.elbow_Attachment_Right); add(c.allGender.elbow_Attachment_Left);
+            }
+            return parts;
+        }
+
+        private Material FadeCopy(Material own, Shader fadeShader)
+        {
+            if (own == null) return null;
+            Material copy;
+            if (_fadeCopies.TryGetValue(own, out copy) && copy != null) return copy;
+            copy = new Material(fadeShader) { name = own.name + " (seated fade)" };
+            copy.CopyPropertiesFromMaterial(own);
+            // The copy brings the body's opaque render queue with it; see-through has to draw after the world.
+            copy.renderQueue = -1;
+            copy.shaderKeywords = new string[0];
+            _fadeCopies[own] = copy;
+            return copy;
+        }
+
+        /// <summary>Put the body's own materials and arms back after <see cref="SetChestFade"/>, and drop the copies.</summary>
+        public void ClearChestFade()
+        {
+            if (_fadeSaved != null && _renderers != null)
+            {
+                for (int i = 0; i < _renderers.Length && i < _fadeSaved.Length; i++)
+                {
+                    if (_renderers[i] == null) continue;
+                    if (_fadeSaved[i] != null) _renderers[i].sharedMaterials = _fadeSaved[i];
+                    // Back on with the rest of the body; whoever hides the body next hides these too.
+                    if (_fadeArms.Contains(_renderers[i].gameObject)) _renderers[i].enabled = true;
+                }
+            }
+            _fadeSaved = null;
+            _fadeArms.Clear();
+            foreach (var copy in _fadeCopies.Values)
+                if (copy != null) UnityEngine.Object.Destroy(copy);
+            _fadeCopies.Clear();
+        }
+
+        /// <summary>True while <see cref="SetChestFade"/> has the body's materials swapped.</summary>
+        public bool ChestFadeOn { get { return _fadeSaved != null; } }
+
         /// <summary>
         /// Restyle this body in place after an appearance change. Deliberately NOT a destroy-and-rebuild: a
         /// rebuild is throttled, it is gated on scaled Time.time (frozen while the pause menu holds timeScale
@@ -278,6 +485,7 @@ namespace SailwindPlayerModel
         public void RefreshAppearance(PlayerAppearance appearance)
         {
             if (_instance == null) return;
+            ClearChestFade();   // the restyle writes the body's own materials; the fade copies them again next frame
             var c = _instance.GetComponentInChildren<PsychoticLab.CharacterCustomizer>(true);
             if (c != null) appearance.ApplyLive(c);
         }
@@ -285,6 +493,8 @@ namespace SailwindPlayerModel
         public void Destroy()
         {
             Poses.Clear();
+            ClearChestFade();
+            if (_scorch != null) { _scorch.Destroy(); _scorch = null; }
             PlayerAppearance.ReleaseOwnedMaterial(_instance);
             if (_instance != null) UnityEngine.Object.Destroy(_instance);
             _instance = null;
@@ -298,34 +508,91 @@ namespace SailwindPlayerModel
             _animSpeed = 0f;
             _heldItem = null;
             _heldFollower = null;
+            _ixTarget = null;
+            _ixKind = InteractionKind.None;
+            _ixOffset = Vector3.zero;
+            _ixYaw = 0f;
+            _heldView = null;
+            _rotor.Release();
+            _itemPoseValid = false;
+            _itemBlend = 0f;
         }
 
-        // ---- held tool ---------------------------------------------------------------------------------
+        // ---- held items and controls -------------------------------------------------------------------
 
         /// <summary>
-        /// Hand in this frame's pose for the item this body holds. <paramref name="item"/> is the transform to
-        /// draw in the hand when <see cref="PlacesHeldItemInHand"/> is true; <paramref name="follower"/>
-        /// (optional) is moved with it, for an item whose physics object is a separate transform. Big items
-        /// (crates, barrels) are carried out in front, so they never go in the hand; the arm reaches toward
-        /// them instead.
+        /// Hand in this frame's pose for the item this body holds, as the game has it. How it ends up held is up
+        /// to the item (see ItemPoses): most items are drawn in the hands in a pose that suits them, and the
+        /// oar, fishing rod and chip log stay where the game has them with the hands reaching. <paramref name="follower"/>
+        /// (optional) is moved with the item, for an item whose physics object is a separate transform.
+        /// Co-op calls this for crewmates.
         /// </summary>
         public void SetHeldItemPose(Transform item, Transform follower, Vector3 worldPos, Quaternion worldRot, bool big)
+        {
+            SetHeldItem(item, follower, worldPos, worldRot, big, null);
+        }
+
+        /// <summary>
+        /// Same as <see cref="SetHeldItemPose"/>, with the holder's own view transform (the local player's
+        /// pointer). With it the pose reads exactly what the game is doing with the item: a swing, a tilt, the
+        /// pull toward the mouth. Without it those are estimated from where the item is.
+        /// </summary>
+        public void SetHeldItem(Transform item, Transform follower, Vector3 worldPos, Quaternion worldRot, bool big, Transform view)
         {
             _heldItem = item;
             _heldFollower = follower;
             _heldPos = worldPos;
             _heldRot = worldRot;
             _heldBig = big;
+            _heldView = view;
             _heldFrame = Time.frameCount;
         }
 
         /// <summary>
-        /// True when this body draws the held item itself (in its hand), so the caller must NOT write the
-        /// item's transform. Only meaningful after this frame's SetHeldItemPose.
+        /// Show this body using a control or holding a rope this frame: the ship's wheel, a winch or bilge pump,
+        /// a sail pusher, or a mooring rope. Call every frame while it lasts; one missed frame lowers the arms.
+        /// Carried items go through <see cref="SetHeldItemPose"/> instead. Co-op calls this for crewmates.
+        /// </summary>
+        public void SetInteraction(InteractionKind kind, Transform target)
+        {
+            _ixKind = kind;
+            _ixTarget = target;
+            _ixFrame = Time.frameCount;
+        }
+
+        /// <summary>The interaction posed on the last tick. None when the hands are free.</summary>
+        public InteractionKind CurrentInteraction { get; private set; }
+
+        /// <summary>
+        /// When true, this body never moves the held item's transform itself; its owner draws the item at render
+        /// time using <see cref="TryGetItemRenderPose"/>. The local body uses this, because the game repositions
+        /// your held item every frame and its physics reads that transform.
+        /// </summary>
+        public bool HeldItemRenderOnly { get; set; }
+
+        /// <summary>
+        /// Where the held item should be drawn this frame, and at what extra scale (a scroll or map unrolling),
+        /// blended from where the game holds it (<paramref name="floating"/>) as the pose eases in. False when the
+        /// game's own placement stands.
+        /// </summary>
+        public bool TryGetItemRenderPose(Vector3 floating, Quaternion floatingRot, out Vector3 pos, out Quaternion rot, out Vector3 scaleMul)
+        {
+            pos = floating; rot = floatingRot; scaleMul = Vector3.one;
+            if (!_itemPoseValid || !_itemPose.Repose || _itemBlend <= 0.001f) return false;
+            if (CurrentInteraction != InteractionKind.Carry && CurrentInteraction != InteractionKind.CarryBig && CurrentInteraction != InteractionKind.Rope) return false;
+            pos = Vector3.Lerp(floating, _itemPose.Pos, _itemBlend);
+            rot = Quaternion.Slerp(floatingRot, _itemPose.Rot, _itemBlend);
+            scaleMul = Vector3.Lerp(Vector3.one, _itemPose.ScaleMul, _itemBlend);
+            return true;
+        }
+
+        /// <summary>
+        /// True when this body draws the held item itself, so the caller must NOT write the item's transform.
+        /// Only meaningful after this frame's SetHeldItemPose.
         ///
-        /// This MUST mirror every gate on the path to the arm solve. If it said yes while the solve never ran,
-        /// nobody would write the item and it would freeze in mid-air - which is exactly what happens if the
-        /// rig or the arm capture failed, or if something has claimed the right arm.
+        /// This MUST mirror every gate on the path to the item being written. If it said yes while nothing wrote
+        /// the item, it would freeze in mid-air - which is exactly what happens if the rig or the arm capture
+        /// failed, or if something has claimed the arms.
         /// </summary>
         public bool PlacesHeldItemInHand
         {
@@ -333,11 +600,15 @@ namespace SailwindPlayerModel
             {
                 return _instance != null
                        && RigReady
-                       && _armR.Ready
-                       && !_heldBig
-                       && !Poses.IsSuppressed(PoseParts.RightArm)
+                       && (_armR.Ready || _armL.Ready)
+                       && !HeldItemRenderOnly
+                       && !(Time.frameCount - _ixFrame <= 1 && _ixKind != InteractionKind.None)
+                       && !Poses.IsSuppressed(PoseParts.Arms)
+                       && InteractionTuning.Enabled != null && InteractionTuning.Enabled.Value
                        && HeldToolPose.Mode != null
-                       && HeldToolPose.Mode.Value == HeldPoseMode.ItemInHand;
+                       && HeldToolPose.Mode.Value == HeldPoseMode.ItemInHand
+                       && _heldItem != null
+                       && ItemPoses.Reposes(_heldItem);
             }
         }
 
@@ -347,13 +618,160 @@ namespace SailwindPlayerModel
         /// Advance this body one frame: the one-time fit, then the pose. Call from LateUpdate, after the root
         /// has been placed. Never throws on a missing rig - it simply does nothing.
         /// </summary>
+        /// <summary>
+        /// Sit this body down this frame: hip joints at <paramref name="hipsWorld"/>, facing
+        /// <paramref name="forwardWorld"/>, legs as <paramref name="legs"/> says, over a floor at
+        /// <paramref name="floorWorldY"/>. Call every frame while seated; the body stands back up on its own once the
+        /// calls stop. A big change of facing between calls is turned through, not jumped to.
+        /// </summary>
+        public void SetSeat(Vector3 hipsWorld, Vector3 forwardWorld, SeatPose pose, float floorWorldY)
+        {
+            _seatHips = hipsWorld;
+            _seatForward = forwardWorld;
+            _seatPose = pose;
+            _seatFloorY = floorWorldY;
+            _seatFrame = Time.frameCount;
+        }
+
+        /// <summary>
+        /// Lay this body down this frame, on its back: head at <paramref name="headWorld"/>, feet toward
+        /// <paramref name="alongWorld"/>, chest toward <paramref name="upWorld"/>. Call every frame while lying.
+        /// </summary>
+        public void SetLying(Vector3 headWorld, Vector3 alongWorld, Vector3 upWorld)
+        {
+            _lieHead = headWorld;
+            _lieAlong = alongWorld;
+            _lieUp = upWorld;
+            _lieFrame = Time.frameCount;
+        }
+
+        /// <summary>True while the body is sitting or getting up from a seat.</summary>
+        public bool IsSeated { get { return _seat01 > 0.01f; } }
+
+        /// <summary>How many parts a ragdoll pose has (see <see cref="RagdollPart"/>).</summary>
+        public const int RagdollParts = 11;
+
+        /// <summary>
+        /// Pose this body as a ragdoll this frame: the pelvis bone at <paramref name="pelvisWorld"/> and each ragdoll bone
+        /// turned to <paramref name="rotationsWorld"/> (in <see cref="RagdollPart"/> order), over a floor at about
+        /// <paramref name="floorWorldY"/>, with the arms doing <paramref name="reaction"/>. Call every frame while down;
+        /// follow it with <see cref="SetGettingUp"/> to get up from where it lies.
+        /// </summary>
+        public void SetRagdoll(Vector3 pelvisWorld, Quaternion[] rotationsWorld, float floorWorldY, FallReaction reaction)
+        {
+            if (rotationsWorld == null || rotationsWorld.Length < RagdollParts) return;
+            _ragPelvis = pelvisWorld;
+            for (int i = 0; i < RagdollParts; i++) _ragRot[i] = rotationsWorld[i];
+            _ragFloorY = floorWorldY;
+            _ragReaction = reaction;
+            _ragFrame = Time.frameCount;
+        }
+
+        /// <summary>
+        /// Get this body up from the last ragdoll pose it showed, <paramref name="progress01"/> of the way to standing where
+        /// its root is. Call every frame while it gets up.
+        /// </summary>
+        public void SetGettingUp(float progress01)
+        {
+            _getUpTarget = Mathf.Clamp01(progress01);
+            _getUpFrame = Time.frameCount;
+        }
+
+        /// <summary>True while the body is down or getting back up.</summary>
+        public bool IsDowned { get { return _rag01 > 0.01f || _getUp01 > 0.01f; } }
+
+        /// <summary>
+        /// Swim this frame. The body lies along <paramref name="velocityWorld"/>, the way it is actually going: head
+        /// first, or feet first when that is backward, and tipped up or down by the climb or dive of the swim itself. It
+        /// treads water upright only at the surface with no way on; under the surface it stays flat. The head turns to
+        /// look where the player is looking rather than the body turning. Call every frame while in the water.
+        /// </summary>
+        public void SetSwimming(bool underwater, Vector3 velocityWorld)
+        {
+            _swimUnder = underwater;
+            _swimVel = velocityWorld;
+            _swimFrame = Time.frameCount;
+        }
+
+        /// <summary>True while the body is swimming or coming out of it.</summary>
+        public bool IsSwimming { get { return _swim01 > 0.01f; } }
+
+        /// <summary>The bone a ragdoll part poses.</summary>
+        internal Transform RagdollBone(RagdollPart part)
+        {
+            switch (part)
+            {
+                case RagdollPart.Pelvis: return _bPelvis;
+                case RagdollPart.Chest: return _bSpine;
+                case RagdollPart.Head: return _bHead;
+                case RagdollPart.UpperArmL: return _bShoulderL;
+                case RagdollPart.ForearmL: return _bElbowL;
+                case RagdollPart.UpperArmR: return _bShoulderR;
+                case RagdollPart.ForearmR: return _bElbowR;
+                case RagdollPart.ThighL: return _bUpperLegL;
+                case RagdollPart.ShinL: return _bLowerLegL;
+                case RagdollPart.ThighR: return _bUpperLegR;
+                case RagdollPart.ShinR: return _bLowerLegR;
+            }
+            return null;
+        }
+
+        /// <summary>Which way this body's face points, as posed right now.</summary>
+        public Vector3 HeadForward { get { return _bHead != null ? _bHead.rotation * _headFwdLocal : Vector3.forward; } }
+
+        /// <summary>Where this body's eyes are and which way is up for its head, as posed right now.</summary>
+        public bool TryGetEye(out Vector3 eye, out Vector3 headUp)
+        {
+            eye = headUp = Vector3.zero;
+            if (_bHead == null || _needsFit) return false;
+            Quaternion r = _bHead.rotation;
+            headUp = r * _headUpLocal;
+            eye = _bHead.position + headUp * 0.09f + (r * _headFwdLocal) * 0.11f;
+            return true;
+        }
+
+        /// <summary>
+        /// Smoke, flames and steam (each 0 to 1) from the seat of this body's pants this frame: sat on a lit stove for
+        /// too long, in the rain or not. Call every frame while it lasts; all die away on their own once the calls stop.
+        /// </summary>
+        public void SetScorch(float smoke01, float fire01, float steam01)
+        {
+            _scorchSmoke = Mathf.Clamp01(smoke01);
+            _scorchFire = Mathf.Clamp01(fire01);
+            _scorchSteam = Mathf.Clamp01(steam01);
+            _scorchFrame = Time.frameCount;
+        }
+
+        /// <summary>Re-place the scorch effect (see <see cref="SetScorch"/>) at <paramref name="seat"/>, for an owner that knows better where it should be this frame.</summary>
+        public void MoveScorch(Vector3 seat)
+        {
+            if (_scorch != null) _scorch.MoveTo(seat);
+        }
+
+        private ScorchEffect _scorch;
+        private float _scorchSmoke, _scorchFire, _scorchSteam;
+        private int _scorchFrame = -10;
+
+        private void UpdateScorch(float dt)
+        {
+            bool fresh = Time.frameCount - _scorchFrame <= 1;
+            if (!fresh && _scorch == null) return;
+            if (_scorch == null) _scorch = new ScorchEffect();
+            Vector3 seat = _bUpperLegL != null && _bUpperLegR != null
+                ? (_bUpperLegL.position + _bUpperLegR.position) * 0.5f - _instance.transform.up * 0.06f - _instance.transform.forward * 0.05f
+                : _instance.transform.position + Vector3.up * 0.85f;
+            _scorch.Update(seat, fresh ? _scorchSmoke : 0f, fresh ? _scorchFire : 0f, fresh ? _scorchSteam : 0f, dt);
+        }
+
         public void Tick(float dt)
         {
             if (_instance == null || _root == null) return;
+            _itemPoseValid = false;
             if (_dressCheckFrame > 0 && Time.frameCount >= _dressCheckFrame) { _dressCheckFrame = 0; VerifyDressed(); }
             if (_needsFit) Fit();
             else if (_hasBodyBase) ReplantIfNudged();
             DriveAnimation(Mathf.Max(dt, 1e-4f));
+            UpdateScorch(dt);
             // OUTSIDE DriveAnimation on purpose: that returns early on a rig whose leg bones were not found,
             // and a claimant writing the body's own position (PoseParts.Body) needs no bones at all. A claim
             // that silently never ran would be far worse than a body that does not walk.
@@ -430,7 +848,7 @@ namespace SailwindPlayerModel
             float boundsMinLocalY = _root.InverseTransformPoint(new Vector3(wb.center.x, wb.min.y, wb.center.z)).y;
             Plugin.Log.LogInfo($"[PlayerModel] {_name} fit: feetLocalY={feetLocalY:F3} (nudge {BodyTuning.SoleOffsetMeters.Value:F3}), " +
                 $"bodyH={MeasuredHeight:F3}, boundsMinBelowPivot={(feetLocalY - boundsMinLocalY):F3}, " +
-                $"legIk={_legIkReady}, armIk={_armR.Ready}");
+                $"legIk={_legIkReady}, armIk={_armR.Ready}/{_armL.Ready}");
         }
 
         /// <summary>
@@ -450,6 +868,7 @@ namespace SailwindPlayerModel
             FittedFeetLocalY += dy;
             _footLocalL.y += dy;
             _footLocalR.y += dy;
+            _hipMidRoot.y += dy;
             _instance.transform.localPosition = _bodyBaseLocalPos;
             Plugin.Log.LogInfo($"[PlayerModel] {_name} re-planted: sole offset {nudge:F3} (feetLocalY now {FittedFeetLocalY:F3})");
         }
@@ -459,6 +878,13 @@ namespace SailwindPlayerModel
             if (!_armR.Capture(_bShoulderR, _bElbowR, _bHandR))
                 Plugin.Log.LogWarning($"[PlayerModel] {_name}: right arm bones not found (shoulder={_bShoulderR != null}, " +
                     $"elbow={_bElbowR != null}, hand={_bHandR != null}); held items will float as before.");
+            if (!_armL.Capture(_bShoulderL, _bElbowL, _bHandL))
+                Plugin.Log.LogWarning($"[PlayerModel] {_name}: left arm bones not found (shoulder={_bShoulderL != null}, " +
+                    $"elbow={_bElbowL != null}, hand={_bHandL != null}); two-handed poses will use one hand.");
+            if (_bShoulderL != null && _bShoulderR != null)
+                _shoulderMidRoot = _root.InverseTransformPoint((_bShoulderL.position + _bShoulderR.position) * 0.5f);
+            else
+                _shoulderMidRoot = new Vector3(0f, FittedFeetLocalY + MeasuredHeight * 0.8f, 0f);
         }
 
         /// <summary>
@@ -489,6 +915,21 @@ namespace SailwindPlayerModel
             // Standing hip height over the ankle, root-local; feeds the squat setback solve.
             if (_legIkReady)
                 _hipAboveFoot = _root.InverseTransformPoint(_bUpperLegL.position).y - _footLocalL.y;
+            // Where the hips and head sit on the standing body, for putting it on a seat or in a bed.
+            _hipMidRoot = _root.InverseTransformPoint((_bUpperLegL.position + _bUpperLegR.position) * 0.5f);
+            _headAboveSoles = _bHead != null ? _root.InverseTransformPoint(_bHead.position).y - FittedFeetLocalY : MeasuredHeight * 0.9f;
+            // Which way the face and chest point, for aiming arms at the head while down and for the eyes.
+            Transform inst = _instance.transform;
+            if (_bHead != null)
+            {
+                _headFwdLocal = Quaternion.Inverse(_bHead.rotation) * inst.forward;
+                _headUpLocal = Quaternion.Inverse(_bHead.rotation) * inst.up;
+            }
+            if (_bSpine != null)
+            {
+                _chestFwdLocal = Quaternion.Inverse(_bSpine.rotation) * inst.forward;
+                _chestUpLocal = Quaternion.Inverse(_bSpine.rotation) * inst.up;
+            }
 
             if (_bFootL == null || _bFootR == null)
                 Plugin.Log.LogWarning($"[PlayerModel] {_name}: foot/ankle bone not found; the ankle is approximated from the shin (feet still planted).");
@@ -560,11 +1001,67 @@ namespace SailwindPlayerModel
             _crouch01 = Mathf.Lerp(_crouch01, Crouch01Target, ease);
             _lookPitch = Mathf.Lerp(_lookPitch, LookPitchDegTarget, ease);
             _animSpeed = Mathf.Lerp(_animSpeed, SpeedMps, 1f - Mathf.Exp(-8f * dt));
-            float crouch = _crouch01;
+
+            // Sitting and lying ease in and out at about the pace the seated view settles.
+            bool seatFresh = Time.frameCount - _seatFrame <= 1;
+            bool lieFresh = Time.frameCount - _lieFrame <= 1;
+            _seat01 = Mathf.Lerp(_seat01, seatFresh ? 1f : 0f, 1f - Mathf.Exp(-7f * dt));
+            _lie01 = Mathf.Lerp(_lie01, lieFresh ? 1f : 0f, 1f - Mathf.Exp(-5f * dt));
+            if (!seatFresh && _seat01 < 0.002f) _seat01 = 0f;
+            if (!lieFresh && _lie01 < 0.002f) _lie01 = 0f;
+            if (seatFresh) TrackSeatTurn(dt);
+            else _seatTracking = false;
+            // Knocked down: a ragdoll takes the whole body at once (it started from this very pose), and getting up takes
+            // over from it where it lies.
+            bool ragFresh = Time.frameCount - _ragFrame <= 1;
+            bool getUpFresh = Time.frameCount - _getUpFrame <= 1;
+            if (getUpFresh && !_getUpBegun) BeginGetUp();
+            ResetRagdollBones();
+            if (ragFresh)
+            {
+                if (!_ragHasDrawn || _rag01 < 0.01f || _getUpBegun)
+                {
+                    _ragPelvisDrawn = _ragPelvis;
+                    for (int i = 0; i < RagdollParts; i++) _ragDrawn[i] = _ragRot[i];
+                    _ragHasDrawn = true;
+                    _getUpBegun = false;
+                    _getUp01 = 0f;
+                }
+                else
+                {
+                    float follow = 1f - Mathf.Exp(-25f * dt);
+                    _ragPelvisDrawn = Vector3.Lerp(_ragPelvisDrawn, _ragPelvis, follow);
+                    for (int i = 0; i < RagdollParts; i++) _ragDrawn[i] = Quaternion.Slerp(_ragDrawn[i], _ragRot[i], follow);
+                }
+                _rag01 = 1f;
+            }
+            else
+            {
+                // Getting up starts from the last ragdoll pose; anything else (the water, a cut-short fall) eases back to standing.
+                _rag01 = getUpFresh ? 0f : Mathf.Max(0f, _rag01 - dt * 3.5f);
+            }
+            if (getUpFresh)
+            {
+                // Never backward, and eased, so progress arriving a few times a second still moves smoothly.
+                _getUpShown = Mathf.Max(_getUpShown, Mathf.Lerp(_getUpShown, _getUpTarget, 1f - Mathf.Exp(-12f * dt)));
+                _getUp01 = 1f;
+            }
+            else if (_getUpBegun)
+            {
+                _getUp01 = Mathf.Max(0f, _getUp01 - dt * 4f);
+                if (_getUp01 <= 0f) { _getUpBegun = false; _getUpShown = 0f; }
+            }
+            bool swimFresh = Time.frameCount - _swimFrame <= 1 && _rag01 <= 0f && _getUp01 <= 0f;
+            _swim01 = Mathf.Lerp(_swim01, swimFresh ? 1f : 0f, 1f - Mathf.Exp(-4f * dt));
+            if (!swimFresh && _swim01 < 0.002f) _swim01 = 0f;
+            if (_swim01 > 0f) TrackSwim(dt);
+            float rest = Mathf.Max(Mathf.Max(_seat01, _lie01), Mathf.Max(Mathf.Max(_rag01, _getUp01), _swim01));
+            // A seat or a bed stands in for the crouch rather than adding to it.
+            float crouch = _crouch01 * (1f - rest);
 
             // Crouch-walk: the gait continues but with a shorter stride, so a crouched body still steps. The
             // phase advances even while a claim owns the legs, so releasing a claim does not snap the stride.
-            float blend = Mathf.Clamp01(_animSpeed / WalkFullSpeed) * (1f - CrouchStrideCut * crouch);
+            float blend = Mathf.Clamp01(_animSpeed / WalkFullSpeed) * (1f - CrouchStrideCut * crouch) * (1f - rest);
             _gaitPhase = Mathf.Repeat(_gaitPhase + _animSpeed * StrideRadPerM * dt, 2f * Mathf.PI);
             float s    = Mathf.Sin(_gaitPhase);
             float sOpp = Mathf.Sin(_gaitPhase + Mathf.PI);
@@ -626,13 +1123,24 @@ namespace SailwindPlayerModel
             // the look-lean, composed into ONE world-space rotate about root.right AFTER the breathe swing.
             // This is the single spine pitch, so the look-lean pivots the whole upper body (Spine_01 to
             // chest/head/arms) on the hips while standing and adds to the crouch fold when crouched.
-            float spinePitch = CrouchTorsoLean * crouch + lookLean;
+            // Seated, a slight slouch; lying, the look-lean would fold the torso off the mattress, so it fades out.
+            // Swinging round on the seat, the torso leans back over the hips to lift the legs.
+            // On the floor, each pose has its own lean: back on the hands, upright, forward over hugged knees.
+            float floorLean = 0f;
+            for (int i = 0; i < _floorW.Length; i++) floorLean += FloorLean[i] * _floorW[i];
+            float down = Mathf.Max(Mathf.Max(_rag01, _getUp01), _swim01);
+            float spinePitch = (CrouchTorsoLean * crouch + lookLean) * (1f - Mathf.Max(_lie01, down)) + (6f - 12f * _tuck + floorLean) * _seat01 * (1f - down);
             if (spine && _bSpine != null && Mathf.Abs(spinePitch) > 0.001f)
                 _bSpine.Rotate(_root.right, spinePitch, Space.World);
 
             // Crouch body drop: lower the whole body so the hips, torso and head come down, relative to the
             // planted base. MUST run BEFORE the leg IK so the IK reads the DROPPED hip joints. At crouch 0 this
             // restores the exact base, so standing is untouched.
+            // Interaction placement: step toward and turn to face a control the body is using. Computed from the
+            // vanilla player's position (the root), never from the already-moved body, so it cannot chase itself.
+            UpdateInteractionPlacement(dt, bodyOffset);
+            Quaternion ixYawRot = Quaternion.Euler(0f, _ixYaw, 0f);
+
             if (_hasBodyBase && bodyOffset)
             {
                 float dropM = CrouchDrop * crouch;
@@ -642,7 +1150,13 @@ namespace SailwindPlayerModel
                 // Root-local +Z is the body's facing, so subtracting walks the hips BACKWARD, which is what
                 // turns a kneel into a squat.
                 CrouchOffset = new Vector3(0f, dropM, backM);
-                _instance.transform.localPosition = _bodyBaseLocalPos - CrouchOffset;
+                // The crouch setback is along the body's facing, so it turns with the interaction yaw.
+                _instance.transform.localPosition = _bodyBaseLocalPos + _ixOffset - ixYawRot * CrouchOffset;
+                _instance.transform.localRotation = ixYawRot;
+                if (_seat01 > 0f) PlaceOnSeat();
+                if (_lie01 > 0f) PlaceLying();
+                if (_getUp01 > 0f) PlaceGettingUp(ixYawRot);
+                if (_swim01 > 0f) PlaceSwimming(ixYawRot);
             }
 
             // Leg IK: after the drop moved the hips down, re-plant both ankles (knees bend FORWARD = squat).
@@ -650,15 +1164,28 @@ namespace SailwindPlayerModel
             // each foot swings forward and back (root.forward) and lifts (root.up) on its half of the cycle,
             // alternating left and right, scaled by the walk blend (0 when standing = a planted static squat).
             // Flip CrouchKneeForward to -1 if the knees ever bend backward.
-            if (legs && _legIkReady && crouch > 0.001f)
+            if (legs && _legIkReady && _getUp01 > 0f && _hasBodyBase && bodyOffset)
+            {
+                PoseGetUpLegs(ixYawRot);
+            }
+            else if (legs && _legIkReady && _swim01 > 0f && _hasBodyBase && bodyOffset)
+            {
+                PoseSwimLegs(ixYawRot);
+            }
+            else if (legs && _legIkReady && _seat01 > 0f && _hasBodyBase && bodyOffset)
+            {
+                PoseSeatedLegs(ixYawRot);
+            }
+            else if (legs && _legIkReady && crouch > 0.001f)
             {
                 float kf = BodyTuning.CrouchKneeForward.Value;
                 const float StepLen = 0.28f;   // m, foot forward/back travel at full gait
                 const float StepLift = 0.12f;  // m, swing-foot lift
-                Vector3 stepL = _root.forward * (StepLen * blend * s)    + _root.up * (StepLift * blend * Mathf.Max(0f, s));
-                Vector3 stepR = _root.forward * (StepLen * blend * sOpp) + _root.up * (StepLift * blend * Mathf.Max(0f, sOpp));
-                SolveLegIk(_root, _bUpperLegL, _bLowerLegL, _thighLenL, _shinLenL, _footLocalL, _thighAimLocalL, _shinAimLocalL, kf, stepL, _bFootL, _footRotRootL, _qFootL, crouch);
-                SolveLegIk(_root, _bUpperLegR, _bLowerLegR, _thighLenR, _shinLenR, _footLocalR, _thighAimLocalR, _shinAimLocalR, kf, stepR, _bFootR, _footRotRootR, _qFootR, crouch);
+                Vector3 bodyFwd = _root.rotation * ixYawRot * Vector3.forward;
+                Vector3 stepL = bodyFwd * (StepLen * blend * s)    + _root.up * (StepLift * blend * Mathf.Max(0f, s));
+                Vector3 stepR = bodyFwd * (StepLen * blend * sOpp) + _root.up * (StepLift * blend * Mathf.Max(0f, sOpp));
+                SolveLegIk(_root, _bUpperLegL, _bLowerLegL, _thighLenL, _shinLenL, _footLocalL, _thighAimLocalL, _shinAimLocalL, kf, stepL, _bFootL, _footRotRootL, _qFootL, crouch, _ixOffset, ixYawRot);
+                SolveLegIk(_root, _bUpperLegR, _bLowerLegR, _thighLenR, _shinLenR, _footLocalR, _thighAimLocalR, _shinAimLocalR, kf, stepR, _bFootR, _footRotRootR, _qFootR, crouch, _ixOffset, ixYawRot);
             }
             else if (legs && _legIkReady)
             {
@@ -669,50 +1196,1083 @@ namespace SailwindPlayerModel
                 if (_bFootR != null) _bFootR.localRotation = _qFootR;
             }
 
+            // Lying propped on a pillow: the torso lifted off the mattress a little. After placement, because it
+            // turns about the body's own right axis, which placement just laid down.
+            if (spine && _bSpine != null && _lie01 > 0f)
+                _bSpine.Rotate(_instance.transform.right, 18f * _lie01, Space.World);
+
+            // A ragdoll poses every bone it has, after everything above, so only the arms' reach for the head is left.
+            if (_rag01 > 0f) PoseFromRagdoll(_rag01);
+
             // Last of our own writes, so the arm reaches from where the crouch and look-lean left the
             // shoulder. Claimants run after this, from Tick.
-            if (armR) DriveHeldItemPose(dt);
+            DriveArms(dt, armL, armR);
+
+            // Swimming flat, the body lies along the swim, so looking around is the head's job.
+            if (_swim01 > 0.01f && spine) LookHead(ixYawRot, _swim01 * _swimFlat);
+
+            // Getting up starts exactly where the ragdoll lay and moves off it over the first moments.
+            if (_getUp01 > 0f && _ragHasDrawn)
+            {
+                float w = (1f - Smooth01(_getUpShown / 0.18f)) * _getUp01;
+                if (w > 0.001f) PoseFromRagdoll(w);
+            }
         }
 
-        private void DriveHeldItemPose(float dt)
+        private static float Smooth01(float x)
         {
-            if (!_armR.Ready || HeldToolPose.Mode == null) return;
-            var mode = HeldToolPose.Mode.Value;
-            bool holding = mode != HeldPoseMode.Off && _heldItem != null && Time.frameCount - _heldFrame <= 1;
+            x = Mathf.Clamp01(x);
+            return x * x * (3f - 2f * x);
+        }
 
-            if (holding)
+        /// <summary>
+        /// Follow the seat's facing and hips. Small changes (the boat turning under the seat) are taken at once; a
+        /// big one (legs swung over, a spar turned on) sets a goal the body turns to over about half a second, with
+        /// the hips sliding across from where they were. A half turn goes back the way the last one came, the same
+        /// rule Seating turns the first-person view by, so pressing the key again swings the legs back over the
+        /// same side and pressing it mid-swing reverses it.
+        /// </summary>
+        private void TrackSeatTurn(float dt)
+        {
+            Vector3 f = _seatForward;
+            f.y = 0f;
+            if (f.sqrMagnitude < 1e-6f) return;
+            float raw = Mathf.Atan2(f.x, f.z) * Mathf.Rad2Deg;
+            Vector3 hipsRel = _seatHips - _root.position;
+
+            if (!_seatTracking || _seat01 < 0.02f)
             {
-                if (mode == HeldPoseMode.ItemInHand && !_heldBig)
+                _seatYaw = _seatYawGoal = _seatRawYaw = raw;
+                _seatYawVel = 0f;
+                _seatNextSign = 1f;
+                _tuck = 0f;
+                _straddle01 = _seatPose == SeatPose.Straddle ? 1f : 0f;
+                int pose = FloorIndex(_seatPose);
+                for (int i = 0; i < _floorW.Length; i++) _floorW[i] = i == pose ? 1f : 0f;
+                _seatHipsOffset = Vector3.zero;
+                _seatTracking = true;
+            }
+            else
+            {
+                float d = Mathf.DeltaAngle(_seatRawYaw, raw);
+                if (Mathf.Abs(d) < 30f)
                 {
-                    // Aim the hand the way the holder aims the item: from the head toward where the item really
-                    // is, stopped at a comfortable holding distance, then nudged down and to the side.
-                    Vector3 head = _bHead != null ? _bHead.position : _root.position + _root.up * 0.75f;
-                    Vector3 toItem = _heldPos - head;
-                    Vector3 dir = toItem.sqrMagnitude > 1e-6f ? toItem.normalized : _root.forward;
-                    _armTarget = head + dir * HeldToolPose.HoldDistance.Value
-                                 + _root.up * HeldToolPose.HoldDrop.Value
-                                 + _root.right * HeldToolPose.HoldSide.Value;
+                    _seatYaw += d;
+                    _seatYawGoal += d;
                 }
                 else
                 {
-                    _armTarget = _heldPos;
+                    if (Mathf.Abs(d) > 150f)
+                    {
+                        float round = Mathf.Repeat(d, 360f);
+                        d = _seatNextSign > 0f ? round : round - 360f;
+                        _seatNextSign = -_seatNextSign;
+                    }
+                    _seatYawGoal += d;
+                    _seatHipsOffset += _lastSeatHipsRel - hipsRel;
+                }
+                _seatRawYaw = raw;
+            }
+            _lastSeatHipsRel = hipsRel;
+
+            _seatYaw = Mathf.SmoothDamp(_seatYaw, _seatYawGoal, ref _seatYawVel, 0.2f, 900f, dt);
+            if (Mathf.Abs(_seatYawGoal) > 720f)
+            {
+                float wrap = Mathf.Sign(_seatYawGoal) * 360f;
+                _seatYaw -= wrap;
+                _seatYawGoal -= wrap;
+            }
+            float turning = Mathf.Abs(_seatYawGoal - _seatYaw);
+            _tuck = Mathf.Lerp(_tuck, turning > 12f ? 1f : 0f, 1f - Mathf.Exp(-12f * dt));
+            _straddle01 = Mathf.Lerp(_straddle01, _seatPose == SeatPose.Straddle ? 1f : 0f, 1f - Mathf.Exp(-8f * dt));
+            _seatHipsOffset = Vector3.Lerp(_seatHipsOffset, Vector3.zero, 1f - Mathf.Exp(-8f * dt));
+            int floorPose = FloorIndex(_seatPose);
+            float ease = 1f - Mathf.Exp(-6f * dt);
+            for (int i = 0; i < _floorW.Length; i++) _floorW[i] = Mathf.Lerp(_floorW[i], i == floorPose ? 1f : 0f, ease);
+        }
+
+        /// <summary>0 to 3 for the floor poses in <see cref="_floorW"/> order, -1 for any other way of sitting.</summary>
+        private static int FloorIndex(SeatPose pose)
+        {
+            int i = (int)pose - (int)SeatPose.FloorLegsOut;
+            return i >= 0 && i < 4 ? i : -1;
+        }
+
+        private float FloorWeight()
+        {
+            float w = 0f;
+            for (int i = 0; i < _floorW.Length; i++) w += _floorW[i];
+            return w;
+        }
+
+        /// <summary>
+        /// One leg's ankle target on the floor for one floor pose, the direction its knee points, and how far the
+        /// foot keeps level with the floor (1) rather than following the shin (0).
+        /// </summary>
+        private static void FloorLeg(int pose, bool rightLeg, Vector3 hip, Vector3 fwd, Vector3 outward, float a, float b,
+            out Vector3 ankle, out Vector3 pole, out float level)
+        {
+            switch (pose)
+            {
+                case 0:   // legs out in front, a little apart
+                    ankle = hip + fwd * ((a + b) * 0.92f) + outward * 0.06f;
+                    pole = Vector3.up;
+                    level = 0.15f;
+                    break;
+                case 1:   // cross-legged: each foot tucked under the other knee, one in front of the other, knees out
+                    ankle = hip + fwd * (a * (rightLeg ? 0.45f : 0.62f)) - outward * 0.15f;
+                    pole = (outward * 0.9f + Vector3.up * 0.2f + fwd * 0.2f).normalized;
+                    level = 0f;
+                    break;
+                case 2:   // right knee up with the foot planted near the hips, left leg out and bent to its side
+                    if (rightLeg)
+                    {
+                        ankle = hip + fwd * (a * 0.7f) + outward * 0.03f;
+                        pole = (Vector3.up + fwd * 0.3f).normalized;
+                        level = 1f;
+                    }
+                    else
+                    {
+                        ankle = hip + fwd * ((a + b) * 0.78f) + outward * 0.14f;
+                        pole = (Vector3.up * 0.7f + outward * 0.7f).normalized;
+                        level = 0.3f;
+                    }
+                    break;
+                default:  // both knees drawn up to the chest, feet flat near the hips
+                    ankle = hip + fwd * (a * 0.6f) + outward * 0.05f;
+                    pole = (Vector3.up + fwd * 0.2f).normalized;
+                    level = 1f;
+                    break;
+            }
+        }
+
+        /// <summary>The seated facing, as drawn (mid-turn included), as a yaw inside the root, which is yaw-only.</summary>
+        private Quaternion SeatYaw()
+        {
+            Vector3 f = _seatTracking ? Quaternion.Euler(0f, _seatYaw, 0f) * Vector3.forward : _seatForward;
+            f = _root.InverseTransformDirection(f);
+            f.y = 0f;
+            if (f.sqrMagnitude < 1e-6f) return Quaternion.identity;
+            return Quaternion.Euler(0f, Mathf.Atan2(f.x, f.z) * Mathf.Rad2Deg, 0f);
+        }
+
+        /// <summary>The seated hip joints as drawn: sliding over to a new seat point, and lifted a little while turning.</summary>
+        private Vector3 SeatHipsDrawn()
+        {
+            return _seatHips + _seatHipsOffset + Vector3.up * (0.03f * _tuck);
+        }
+
+        /// <summary>Move the body so its hip joints are on the seat, facing the way the seat faces, eased.</summary>
+        private void PlaceOnSeat()
+        {
+            Quaternion yaw = SeatYaw();
+            Vector3 hips = _root.InverseTransformPoint(SeatHipsDrawn());
+            Vector3 pos = hips - yaw * (_hipMidRoot - _bodyBaseLocalPos);
+            var t = _instance.transform;
+            t.localPosition = Vector3.Lerp(t.localPosition, pos, _seat01);
+            t.localRotation = Quaternion.Slerp(t.localRotation, yaw, _seat01);
+        }
+
+        /// <summary>Lay the body on its back with the head at the given point and the feet along the bed, eased.</summary>
+        private void PlaceLying()
+        {
+            Vector3 along = _lieAlong.sqrMagnitude > 1e-6f ? _lieAlong.normalized : _root.forward;
+            Vector3 up = Vector3.ProjectOnPlane(_lieUp, along);
+            if (up.sqrMagnitude < 1e-6f) up = Vector3.up;
+            up.Normalize();
+            // Body forward (the chest) to the sky, body up (toward the head) back along the bed.
+            Quaternion rot = Quaternion.LookRotation(up, -along);
+            // The body's origin is at the soles, a head's height from the head along the bed.
+            Vector3 soles = _lieHead + along * _headAboveSoles;
+            var t = _instance.transform;
+            t.position = Vector3.Lerp(t.position, soles, _lie01);
+            t.rotation = Quaternion.Slerp(t.rotation, rot, _lie01);
+        }
+
+        // ---- swimming -------------------------------------------------------------------------------------
+
+        private void TrackSwim(float dt)
+        {
+            float speed = _swimVel.magnitude;
+            float move = Mathf.Clamp01((speed - 0.3f) / 1.2f);
+            _swimMove01 = Mathf.Lerp(_swimMove01, move, 1f - Mathf.Exp(-3f * dt));
+            // One stroke every second or so, quicker the faster the swim.
+            float rate = Mathf.Lerp(0.55f, 0.7f + 0.3f * Mathf.Clamp01(speed / 2.5f), _swimMove01);
+            _swimPhase = Mathf.Repeat(_swimPhase + dt * rate * 2f * Mathf.PI, 2f * Mathf.PI);
+
+            Vector3 yawFwd = _root.forward;
+            float along = speed > 0.3f ? Vector3.Dot(_swimVel / speed, yawFwd) : 1f;
+            _swimBack = Mathf.Lerp(_swimBack, along < -0.25f ? 1f : 0f, 1f - Mathf.Exp(-3f * dt));
+            // Flat out in the water: always under the surface, and at the surface once there is way on.
+            float flat = _swimUnder ? Mathf.Max(_swimMove01, 0.75f) : _swimMove01;
+            _swimFlat = Mathf.Lerp(_swimFlat, flat, 1f - Mathf.Exp(-3f * dt));
+        }
+
+        /// <summary>
+        /// Lay the body along the way it is going: head first, or feet first and chest to the sky when that way is
+        /// backward, climbing or diving with the swim. Upright and facing the player's way when treading water at the
+        /// surface. Turned about the shoulders, so the head stays where the view is, with a gentle bob.
+        /// </summary>
+        private void PlaceSwimming(Quaternion ixYawRot)
+        {
+            Quaternion yaw = _root.rotation * ixYawRot;
+            Vector3 yawFwd = yaw * Vector3.forward;
+            float speed = _swimVel.magnitude;
+            Vector3 moveDir = speed > 0.3f ? _swimVel / speed : yawFwd;
+
+            Quaternion rotSwim = Quaternion.Slerp(SwimAlong(moveDir, Vector3.down, yawFwd), SwimAlong(-moveDir, Vector3.up, yawFwd), _swimBack);
+            Quaternion rotTread = Quaternion.LookRotation(yawFwd, Vector3.up);
+            Quaternion rot = Quaternion.Slerp(rotTread, rotSwim, _swimFlat);
+
+            Vector3 shoulderOffset = _shoulderMidRoot - _bodyBaseLocalPos;
+            Vector3 pivot = _root.TransformPoint(_bodyBaseLocalPos + _ixOffset + ixYawRot * shoulderOffset)
+                            + Vector3.up * (0.03f * Mathf.Sin(_swimPhase));
+            Vector3 pos = pivot - rot * shoulderOffset;
+            var t = _instance.transform;
+            t.position = Vector3.Lerp(t.position, pos, _swim01);
+            t.rotation = Quaternion.Slerp(t.rotation, rot, _swim01);
+        }
+
+        /// <summary>A body lying with its head along <paramref name="headDir"/> and its chest toward <paramref name="chestDir"/>.</summary>
+        private static Quaternion SwimAlong(Vector3 headDir, Vector3 chestDir, Vector3 fallbackChest)
+        {
+            if (headDir.sqrMagnitude < 1e-6f) headDir = Vector3.up;
+            headDir.Normalize();
+            Vector3 chest = Vector3.ProjectOnPlane(chestDir, headDir);
+            if (chest.sqrMagnitude < 1e-4f) chest = Vector3.ProjectOnPlane(fallbackChest, headDir);
+            if (chest.sqrMagnitude < 1e-4f) chest = Vector3.ProjectOnPlane(Vector3.forward, headDir);
+            if (chest.sqrMagnitude < 1e-6f) return Quaternion.LookRotation(Vector3.forward, headDir);
+            return Quaternion.LookRotation(chest.normalized, headDir);
+        }
+
+        /// <summary>Where a breaststroke is in its cycle, and which way round it goes (backward, it runs in reverse).</summary>
+        private float SwimStroke(float offset)
+        {
+            float t = Mathf.Repeat(_swimPhase / (2f * Mathf.PI) + offset, 1f);
+            return _swimBack > 0.5f ? 1f - t : t;
+        }
+
+        private void PoseSwimLegs(Quaternion ixYawRot)
+        {
+            Transform body = _instance.transform;
+            Vector3 up = body.up, fwd = body.forward, right = body.right;
+            float kf = BodyTuning.CrouchKneeForward.Value;
+            // The kick comes a moment after the arms, the way a breaststroke goes.
+            float t = SwimStroke(-0.25f);
+            SwimLeg(_bUpperLegL, _bLowerLegL, _thighLenL, _shinLenL, _footLocalL, _thighAimLocalL, _shinAimLocalL, kf, _bFootL, _footRotRootL, _qFootL, ixYawRot, up, fwd, -right, t);
+            SwimLeg(_bUpperLegR, _bLowerLegR, _thighLenR, _shinLenR, _footLocalR, _thighAimLocalR, _shinAimLocalR, kf, _bFootR, _footRotRootR, _qFootR, ixYawRot, up, fwd, right, t);
+        }
+
+        /// <summary>
+        /// One leg through a frog kick: trailing straight while the body glides, heels drawn up with the knees out, then
+        /// swept out and back together. Treading water, the same shapes at a slower, smaller pedal.
+        /// </summary>
+        private void SwimLeg(Transform hip, Transform knee, float a, float b, Vector3 footLocal, Vector3 thighAim, Vector3 shinAim, float kf,
+            Transform foot, Quaternion footRotRoot, Quaternion footBind, Quaternion ixYawRot, Vector3 up, Vector3 fwd, Vector3 outward, float t)
+        {
+            if (hip == null || knee == null) return;
+            Vector3 h = hip.position;
+            float leg = a + b;
+            float trail, wide, forward;
+            if (t < 0.45f)                       // gliding, legs together behind
+            {
+                float k = Smooth01(t / 0.45f);
+                trail = Mathf.Lerp(0.96f, 0.94f, k); wide = Mathf.Lerp(0.07f, 0.06f, k); forward = 0f;
+            }
+            else if (t < 0.72f)                  // heels drawn up, knees out
+            {
+                float k = Smooth01((t - 0.45f) / 0.27f);
+                trail = Mathf.Lerp(0.94f, 0.45f, k); wide = Mathf.Lerp(0.06f, 0.3f, k); forward = Mathf.Lerp(0f, 0.12f, k);
+            }
+            else                                 // swept out and back together
+            {
+                float k = Smooth01((t - 0.72f) / 0.28f);
+                trail = Mathf.Lerp(0.45f, 0.96f, k); wide = Mathf.Lerp(0.3f, 0.07f, Mathf.Max(0f, k * 2f - 1f)) + 0.18f * Mathf.Sin(k * Mathf.PI); forward = Mathf.Lerp(0.12f, 0f, k);
+            }
+            // Treading water is the same kick, smaller and more upright.
+            float size = Mathf.Lerp(0.55f, 1f, _swimMove01);
+            Vector3 target = h - up * (leg * Mathf.Lerp(0.8f, trail, size)) + outward * (wide * size * leg * 0.55f) + fwd * (forward * size * leg * 0.5f);
+            Vector3 standF = _root.TransformPoint(_ixOffset + ixYawRot * footLocal);
+            Vector3 F = Vector3.Lerp(standF, target, _swim01);
+            // Knees out to the sides and toward the chest, never folding back through the body.
+            Vector3 pole = Vector3.Lerp(_root.rotation * ixYawRot * Vector3.forward * kf, (fwd * 0.6f + outward).normalized, _swim01);
+            SolveLegIk(_root, hip, knee, a, b, _root.InverseTransformPoint(F), thighAim, shinAim, kf, Vector3.zero, foot, footRotRoot, footBind,
+                0f, Vector3.zero, Quaternion.identity, pole);
+        }
+
+        /// <summary>
+        /// One hand through a breaststroke: reaching out ahead of the head, sweeping wide and back, tucking in under the
+        /// chin, then pushing forward again. Backward, the same path in reverse, which is what sculling backward looks
+        /// like. Treading water, the same shapes, smaller and in front of the chest.
+        /// </summary>
+        private HandGrip SwimHand(Vector3 shoulder, Vector3 up, Vector3 fwd, Vector3 outward, float t)
+        {
+            float ahead, wide, under;
+            if (t < 0.3f)                        // reaching, hands together out in front
+            {
+                float k = Smooth01(t / 0.3f);
+                ahead = Mathf.Lerp(0.48f, 0.44f, k); wide = Mathf.Lerp(0.1f, 0.16f, k); under = Mathf.Lerp(0.04f, 0.08f, k);
+            }
+            else if (t < 0.6f)                   // sweeping out and back
+            {
+                float k = Smooth01((t - 0.3f) / 0.3f);
+                ahead = Mathf.Lerp(0.44f, 0.12f, k); wide = Mathf.Lerp(0.16f, 0.42f, k); under = Mathf.Lerp(0.08f, 0.2f, k);
+            }
+            else if (t < 0.78f)                  // tucked in under the chin
+            {
+                float k = Smooth01((t - 0.6f) / 0.18f);
+                ahead = Mathf.Lerp(0.12f, 0.16f, k); wide = Mathf.Lerp(0.42f, 0.11f, k); under = Mathf.Lerp(0.2f, 0.22f, k);
+            }
+            else                                 // pushed forward again
+            {
+                float k = Smooth01((t - 0.78f) / 0.22f);
+                ahead = Mathf.Lerp(0.16f, 0.48f, k); wide = Mathf.Lerp(0.11f, 0.1f, k); under = Mathf.Lerp(0.22f, 0.04f, k);
+            }
+            float size = Mathf.Lerp(0.6f, 1f, _swimMove01);
+            Vector3 palm = shoulder + up * (ahead * size) + outward * (wide * size) + fwd * (under * size);
+            Vector3 finger = palm - shoulder;
+            return new HandGrip
+            {
+                On = true,
+                Palm = palm,
+                Normal = -fwd,
+                Finger = finger.sqrMagnitude > 1e-6f ? finger.normalized : up,
+            };
+        }
+
+        /// <summary>
+        /// Turn the head toward what the player is looking at, up to most of a turn away from where the face already
+        /// points. Swimming flat, the body lies along the swim and the head is what looks around.
+        /// </summary>
+        private void LookHead(Quaternion ixYawRot, float weight)
+        {
+            if (_bHead == null || weight < 0.01f) return;
+            Quaternion yaw = _root.rotation * ixYawRot;
+            Vector3 view = yaw * Quaternion.Euler(-_lookPitch, 0f, 0f) * Vector3.forward;
+            Vector3 face = _bHead.rotation * _headFwdLocal;
+            if (face.sqrMagnitude < 1e-6f || view.sqrMagnitude < 1e-6f) return;
+            Vector3 want = Vector3.RotateTowards(face.normalized, view.normalized, 70f * Mathf.Deg2Rad, 0f);
+            _bHead.rotation = Quaternion.FromToRotation(face.normalized, Vector3.Slerp(face.normalized, want, weight)) * _bHead.rotation;
+        }
+
+        // ---- knocked down --------------------------------------------------------------------------------
+
+        /// <summary>
+        /// A ragdoll or a get-up writes the hips bone's place and turn and the head's turn directly, and nothing in the
+        /// ordinary pose puts them back, so they return to their rest pose at the start of every frame.
+        /// </summary>
+        private void ResetRagdollBones()
+        {
+            if (_bPelvis != null)
+            {
+                _bPelvis.localPosition = _pelvisBindPos;
+                _bPelvis.localRotation = _qPelvis;
+            }
+            if (_bHead != null) _bHead.localRotation = _qHead;
+        }
+
+        /// <summary>
+        /// Every ragdoll bone to the drawn ragdoll pose, <paramref name="weight"/> of the way from where it is posed now.
+        /// Each bone's turn is read before any is written, since turning a parent turns its children.
+        /// </summary>
+        private void PoseFromRagdoll(float weight)
+        {
+            for (int i = 0; i < RagdollParts; i++)
+            {
+                var b = RagdollBone((RagdollPart)i);
+                _ragBefore[i] = b != null ? b.rotation : Quaternion.identity;
+            }
+            if (_bPelvis != null) _bPelvis.position = Vector3.Lerp(_bPelvis.position, _ragPelvisDrawn, weight);
+            for (int i = 0; i < RagdollParts; i++)
+            {
+                var b = RagdollBone((RagdollPart)i);
+                if (b != null) b.rotation = weight >= 0.999f ? _ragDrawn[i] : Quaternion.Slerp(_ragBefore[i], _ragDrawn[i], weight);
+            }
+        }
+
+        /// <summary>
+        /// Note how the body lies as getting up starts, from the ragdoll pose still on the bones: where the hips are,
+        /// which way the head lies along the floor, and whether the chest faces down.
+        /// </summary>
+        private void BeginGetUp()
+        {
+            _getUpBegun = true;
+            _getUpShown = 0f;
+            if (!_ragHasDrawn || _bHead == null || _bSpine == null || !_legIkReady)
+            {
+                // Nothing to get up from (a crewmate first seen part way up): standing already.
+                _getUpShown = 1f;
+                return;
+            }
+            Vector3 hips = (_bUpperLegL.position + _bUpperLegR.position) * 0.5f;
+            Vector3 along = _bHead.position - hips;
+            along.y = 0f;
+            _guAlong = along.sqrMagnitude > 1e-4f ? along.normalized : _root.forward;
+            _guPelvis = hips;
+            _guFaceDown = (_bSpine.rotation * _chestFwdLocal).y < 0f;
+            _guFloorY = Mathf.Min(_ragFloorY, hips.y - 0.1f);
+        }
+
+        private struct GetUpKey
+        {
+            public Vector3 Hips, Up, Forward, FootL, FootR, Pole, HandL, HandR;
+            public float FootLevel, HandW;
+        }
+
+        private static GetUpKey LerpKey(GetUpKey a, GetUpKey b, float t)
+        {
+            return new GetUpKey
+            {
+                Hips = Vector3.Lerp(a.Hips, b.Hips, t),
+                Up = Vector3.Slerp(a.Up, b.Up, t),
+                Forward = Vector3.Slerp(a.Forward, b.Forward, t),
+                FootL = Vector3.Lerp(a.FootL, b.FootL, t),
+                FootR = Vector3.Lerp(a.FootR, b.FootR, t),
+                Pole = Vector3.Slerp(a.Pole, b.Pole, t),
+                HandL = Vector3.Lerp(a.HandL, b.HandL, t),
+                HandR = Vector3.Lerp(a.HandR, b.HandR, t),
+                FootLevel = Mathf.Lerp(a.FootLevel, b.FootLevel, t),
+                HandW = Mathf.Lerp(a.HandW, b.HandW, t),
+            };
+        }
+
+        private static Vector3 OnFloor(Vector3 p, float y)
+        {
+            p.y = y;
+            return p;
+        }
+
+        /// <summary>
+        /// The get-up pose at the current progress: four key poses eased between. Face down: flat, onto hands and knees,
+        /// back into a squat, standing. Face up: flat, sitting up with the knees drawn in and the hands behind, forward
+        /// into a squat, standing. The standing pose is the ordinary one where the root is now, so getting up ends
+        /// exactly on it.
+        /// </summary>
+        private GetUpKey GetUpPose(Quaternion ixYawRot)
+        {
+            float kf = BodyTuning.CrouchKneeForward.Value;
+            Quaternion standRot = _root.rotation * ixYawRot;
+            var stand = new GetUpKey
+            {
+                Hips = _root.TransformPoint(_bodyBaseLocalPos + _ixOffset + ixYawRot * (_hipMidRoot - _bodyBaseLocalPos)),
+                Up = Vector3.up,
+                Forward = standRot * Vector3.forward,
+                FootL = _root.TransformPoint(_ixOffset + ixYawRot * _footLocalL),
+                FootR = _root.TransformPoint(_ixOffset + ixYawRot * _footLocalR),
+                Pole = standRot * Vector3.forward * kf,
+                FootLevel = 1f,
+                HandW = 0f,
+            };
+            stand.HandL = stand.HandR = stand.Hips;
+            if (_getUpShown >= 0.999f) return stand;
+
+            Vector3 up = Vector3.up, along = _guAlong;
+            Vector3 side = Vector3.Cross(Vector3.up, along).normalized;
+            Vector3 g = new Vector3(_guPelvis.x, _guFloorY, _guPelvis.z);
+            float floor = _guFloorY;
+            float leg = _thighLenL + _shinLenL;
+            float ankle = Mathf.Max(0.06f, _footLocalL.y - FittedFeetLocalY);
+
+            GetUpKey k0, k1, k2;
+            float a, b;
+            if (_guFaceDown)
+            {
+                // Lying face down with the head along the floor, the body's right is +side.
+                Vector3 h0 = g + up * 0.14f;
+                k0 = new GetUpKey
+                {
+                    Hips = h0, Up = along, Forward = Vector3.down,
+                    FootL = OnFloor(h0 - along * (leg * 0.95f) - side * 0.1f, floor + ankle),
+                    FootR = OnFloor(h0 - along * (leg * 0.95f) + side * 0.1f, floor + ankle),
+                    Pole = Vector3.down,
+                    HandL = OnFloor(h0 + along * 0.55f - side * 0.28f, floor + 0.03f),
+                    HandR = OnFloor(h0 + along * 0.55f + side * 0.28f, floor + 0.03f),
+                    FootLevel = 0f, HandW = 1f,
+                };
+                Vector3 h1 = g - along * 0.2f + up * 0.45f;
+                Vector3 up1 = (along + up * 0.35f).normalized;
+                Vector3 shoulders1 = h1 + up1 * 0.5f;
+                k1 = new GetUpKey
+                {
+                    Hips = h1, Up = up1, Forward = Vector3.Cross(side, up1),
+                    FootL = OnFloor(g - along * (0.2f + _shinLenL * 0.95f) - side * 0.12f, floor + 0.06f),
+                    FootR = OnFloor(g - along * (0.2f + _shinLenL * 0.95f) + side * 0.12f, floor + 0.06f),
+                    Pole = Vector3.down,
+                    HandL = OnFloor(shoulders1 - side * 0.2f, floor + 0.03f),
+                    HandR = OnFloor(shoulders1 + side * 0.2f, floor + 0.03f),
+                    FootLevel = 0f, HandW = 1f,
+                };
+                Vector3 h2 = g - along * 0.35f + up * 0.55f;
+                Vector3 up2 = (up * 0.75f + along * 0.65f).normalized;
+                k2 = new GetUpKey
+                {
+                    Hips = h2, Up = up2, Forward = Vector3.Cross(side, up2),
+                    FootL = OnFloor(g - along * 0.25f - side * 0.13f, floor + ankle),
+                    FootR = OnFloor(g - along * 0.25f + side * 0.13f, floor + ankle),
+                    Pole = along,
+                    HandL = h2 + along * (_thighLenL * 0.8f) - side * 0.15f + up * 0.05f,
+                    HandR = h2 + along * (_thighLenL * 0.8f) + side * 0.15f + up * 0.05f,
+                    FootLevel = 1f, HandW = 0.7f,
+                };
+                a = 0.32f; b = 0.64f;
+            }
+            else
+            {
+                // Lying face up with the head along the floor, the body's right is -side.
+                Vector3 h0 = g + up * 0.13f;
+                k0 = new GetUpKey
+                {
+                    Hips = h0, Up = along, Forward = up,
+                    FootL = OnFloor(h0 - along * (leg * 0.95f) + side * 0.1f, floor + ankle),
+                    FootR = OnFloor(h0 - along * (leg * 0.95f) - side * 0.1f, floor + ankle),
+                    Pole = up,
+                    HandL = OnFloor(h0 + along * 0.05f + side * 0.3f, floor + 0.03f),
+                    HandR = OnFloor(h0 + along * 0.05f - side * 0.3f, floor + 0.03f),
+                    FootLevel = 0f, HandW = 0.6f,
+                };
+                Vector3 h1 = g + up * 0.12f - along * 0.08f;
+                Vector3 up1 = (up + along * 0.35f).normalized;
+                Vector3 feetL = OnFloor(g - along * 0.5f + side * 0.12f, floor + ankle);
+                Vector3 feetR = OnFloor(g - along * 0.5f - side * 0.12f, floor + ankle);
+                k1 = new GetUpKey
+                {
+                    Hips = h1, Up = up1, Forward = Vector3.ProjectOnPlane(-along, up1).normalized,
+                    FootL = feetL, FootR = feetR,
+                    Pole = up,
+                    HandL = OnFloor(g + along * 0.22f + side * 0.25f, floor + 0.03f),
+                    HandR = OnFloor(g + along * 0.22f - side * 0.25f, floor + 0.03f),
+                    FootLevel = 1f, HandW = 1f,
+                };
+                Vector3 h2 = g - along * 0.38f + up * 0.5f;
+                Vector3 up2 = (up - along * 0.55f).normalized;
+                k2 = new GetUpKey
+                {
+                    Hips = h2, Up = up2, Forward = Vector3.ProjectOnPlane(-along, up2).normalized,
+                    FootL = feetL, FootR = feetR,
+                    Pole = -along,
+                    HandL = h2 - along * (_thighLenL * 0.8f) + side * 0.15f + up * 0.05f,
+                    HandR = h2 - along * (_thighLenL * 0.8f) - side * 0.15f + up * 0.05f,
+                    FootLevel = 1f, HandW = 0.6f,
+                };
+                a = 0.34f; b = 0.68f;
+            }
+
+            float t = _getUpShown;
+            if (t < a) return LerpKey(k0, k1, Smooth01(t / a));
+            if (t < b) return LerpKey(k1, k2, Smooth01((t - a) / (b - a)));
+            return LerpKey(k2, stand, Smooth01((t - b) / (1f - b)));
+        }
+
+        /// <summary>Place the body for this moment of getting up, and note where its feet and hands go.</summary>
+        private void PlaceGettingUp(Quaternion ixYawRot)
+        {
+            var k = GetUpPose(ixYawRot);
+            _guFootL = k.FootL;
+            _guFootR = k.FootR;
+            _guPole = k.Pole;
+            _guHandL = k.HandL;
+            _guHandR = k.HandR;
+            _guFootLevel = k.FootLevel;
+            _guHandW = k.HandW;
+            Vector3 up = k.Up.sqrMagnitude > 1e-6f ? k.Up.normalized : Vector3.up;
+            Vector3 fwd = Vector3.ProjectOnPlane(k.Forward, up);
+            if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.ProjectOnPlane(_root.forward, up);
+            Quaternion rot = Quaternion.LookRotation(fwd.normalized, up);
+            Vector3 pos = k.Hips - rot * (_hipMidRoot - _bodyBaseLocalPos);
+            var t = _instance.transform;
+            t.position = Vector3.Lerp(t.position, pos, _getUp01);
+            t.rotation = Quaternion.Slerp(t.rotation, rot, _getUp01);
+        }
+
+        private void PoseGetUpLegs(Quaternion ixYawRot)
+        {
+            float kf = BodyTuning.CrouchKneeForward.Value;
+            GetUpLeg(_bUpperLegL, _bLowerLegL, _thighLenL, _shinLenL, _footLocalL, _thighAimLocalL, _shinAimLocalL, kf, _bFootL, _footRotRootL, _qFootL, ixYawRot, _guFootL);
+            GetUpLeg(_bUpperLegR, _bLowerLegR, _thighLenR, _shinLenR, _footLocalR, _thighAimLocalR, _shinAimLocalR, kf, _bFootR, _footRotRootR, _qFootR, ixYawRot, _guFootR);
+        }
+
+        private void GetUpLeg(Transform hip, Transform knee, float a, float b, Vector3 footLocal, Vector3 thighAim, Vector3 shinAim, float kf,
+            Transform foot, Quaternion footRotRoot, Quaternion footBind, Quaternion ixYawRot, Vector3 target)
+        {
+            if (hip == null || knee == null) return;
+            Vector3 standF = _root.TransformPoint(_ixOffset + ixYawRot * footLocal);
+            Vector3 F = Vector3.Lerp(standF, target, _getUp01);
+            SolveLegIk(_root, hip, knee, a, b, _root.InverseTransformPoint(F), thighAim, shinAim, kf, Vector3.zero, foot, footRotRoot, footBind,
+                _guFootLevel, Vector3.zero, Quaternion.identity, _guPole);
+        }
+
+        /// <summary>
+        /// What the arms do while down, from the head and chest as the ragdoll has them: both palms over the face, both
+        /// hands over the top of the head with the elbows in front, or flung out wide. Never below the floor.
+        /// </summary>
+        private void ReactionHands(float dt, ref HandGrip gr, ref HandGrip gl, ref Vector3 poleR, ref Vector3 poleL)
+        {
+            float ease = 1f - Mathf.Exp(-8f * dt);
+            _coverFace01 = Mathf.Lerp(_coverFace01, _ragReaction == FallReaction.CoverFace ? 1f : 0f, ease);
+            _coverHead01 = Mathf.Lerp(_coverHead01, _ragReaction == FallReaction.CoverHead ? 1f : 0f, ease);
+            _flail01 = Mathf.Lerp(_flail01, _ragReaction == FallReaction.Flail ? 1f : 0f, ease);
+            if (_bHead == null || _bSpine == null) return;
+
+            Quaternion hr = _bHead.rotation;
+            Vector3 head = _bHead.position;
+            Vector3 hUp = hr * _headUpLocal, hFwd = hr * _headFwdLocal;
+            Vector3 hRight = Vector3.Cross(hUp, hFwd).normalized;
+            Quaternion cr = _bSpine.rotation;
+            Vector3 cUp = cr * _chestUpLocal, cFwd = cr * _chestFwdLocal;
+            Vector3 cRight = Vector3.Cross(cUp, cFwd).normalized;
+            float floor = _ragFloorY + 0.03f;
+
+            if (_coverFace01 >= _coverHead01 && _coverFace01 >= _flail01 && _coverFace01 > 0.3f)
+            {
+                gr = new HandGrip { On = true, Palm = head + hFwd * 0.14f + hUp * 0.06f + hRight * 0.04f, Normal = -hFwd, Finger = hUp };
+                gl = new HandGrip { On = true, Palm = head + hFwd * 0.14f + hUp * 0.06f - hRight * 0.04f, Normal = -hFwd, Finger = hUp };
+                poleR = -hUp + hRight * 0.6f;
+                poleL = -hUp - hRight * 0.6f;
+            }
+            else if (_coverHead01 >= _flail01 && _coverHead01 > 0.3f)
+            {
+                gr = new HandGrip { On = true, Palm = head + hUp * 0.16f + hRight * 0.07f - hFwd * 0.02f, Normal = -hUp, Finger = -hFwd };
+                gl = new HandGrip { On = true, Palm = head + hUp * 0.16f - hRight * 0.07f - hFwd * 0.02f, Normal = -hUp, Finger = -hFwd };
+                poleR = hFwd + hRight * 0.5f;
+                poleL = hFwd - hRight * 0.5f;
+            }
+            else if (_flail01 > 0.3f)
+            {
+                float wave = Mathf.Sin(Time.time * 9f);
+                Vector3 sR = _bShoulderR != null ? _bShoulderR.position : head, sL = _bShoulderL != null ? _bShoulderL.position : head;
+                gr = new HandGrip { On = true, Palm = sR + cRight * 0.42f + cUp * (0.3f + 0.12f * wave) + cFwd * 0.1f, Normal = cFwd, Finger = cRight };
+                gl = new HandGrip { On = true, Palm = sL - cRight * 0.42f + cUp * (0.3f - 0.12f * wave) + cFwd * 0.1f, Normal = cFwd, Finger = -cRight };
+                poleR = -cUp;
+                poleL = -cUp;
+            }
+            if (gr.On) gr.Palm.y = Mathf.Max(gr.Palm.y, floor);
+            if (gl.On) gl.Palm.y = Mathf.Max(gl.Palm.y, floor);
+        }
+
+        /// <summary>
+        /// Seated legs: thighs forward from the hips, feet planted on the floor in front, or hanging below the knees
+        /// when the floor is out of reach. Solved with the crouch's two-bone IK, blended from the standing targets
+        /// so sitting down and standing up move the feet rather than snap them.
+        /// </summary>
+        private void PoseSeatedLegs(Quaternion ixYawRot)
+        {
+            Quaternion seatYaw = SeatYaw();
+            Quaternion frame = Quaternion.Slerp(ixYawRot, seatYaw, _seat01);
+            Vector3 fwd = _root.rotation * seatYaw * Vector3.forward;
+            Vector3 right = _root.rotation * seatYaw * Vector3.right;
+            float kf = BodyTuning.CrouchKneeForward.Value;
+            float swing = 0.03f * Mathf.Sin(Time.time * 0.9f);
+            SeatOneLeg(_bUpperLegL, _bLowerLegL, _thighLenL, _shinLenL, _footLocalL, _thighAimLocalL, _shinAimLocalL, kf, _bFootL, _footRotRootL, _qFootL, ixYawRot, frame, fwd, -right, swing, false);
+            SeatOneLeg(_bUpperLegR, _bLowerLegR, _thighLenR, _shinLenR, _footLocalR, _thighAimLocalR, _shinAimLocalR, kf, _bFootR, _footRotRootR, _qFootR, ixYawRot, frame, fwd, right, -swing, true);
+        }
+
+        private void SeatOneLeg(Transform hip, Transform knee, float a, float b, Vector3 footLocal, Vector3 thighAim, Vector3 shinAim,
+            float kf, Transform foot, Quaternion footRotRoot, Quaternion footBind, Quaternion ixYawRot, Quaternion frame, Vector3 fwd, Vector3 outward, float swing,
+            bool rightLeg)
+        {
+            if (hip == null || knee == null) return;
+            Vector3 standF = _root.TransformPoint(_ixOffset + ixYawRot * footLocal);
+            Vector3 h = hip.position;
+            float ankle = footLocal.y - FittedFeetLocalY;            // the ankle over the sole
+            float drop = h.y - (_seatFloorY + ankle);                  // hip over the ankle on the floor
+            Vector3 seatF;
+            bool hanging = _seatPose == SeatPose.Dangle || _seatPose == SeatPose.Straddle;
+            // Sitting on the floor itself: the legs go out in front along it.
+            bool onFloor = !hanging && drop < a * 0.6f;
+            bool dangle = !onFloor && (hanging || drop > b * 1.05f);
+            if (onFloor)
+            {
+                seatF = h + fwd * ((a + b) * 0.93f);
+                seatF.y = _seatFloorY + ankle;
+            }
+            else if (!dangle)
+            {
+                seatF = h + fwd * (a * 0.95f);
+                seatF.y = _seatFloorY + ankle;
+            }
+            else
+            {
+                seatF = h + fwd * (a * 0.9f + swing) - Vector3.up * (b * 0.95f);
+            }
+            bool footLoose = dangle;
+            float footLevel = 1f;
+            Vector3 pole = Vector3.zero;
+            // On the floor: the floor poses, blended by how much of each is showing.
+            float floorW = FloorWeight();
+            if (floorW > 0.001f)
+            {
+                Vector3 sumF = Vector3.zero, sumPole = Vector3.zero;
+                float sumLevel = 0f;
+                for (int i = 0; i < _floorW.Length; i++)
+                {
+                    if (_floorW[i] < 0.001f) continue;
+                    Vector3 t, p; float level;
+                    FloorLeg(i, rightLeg, h, fwd, outward, a, b, out t, out p, out level);
+                    t.y = _seatFloorY + ankle;
+                    sumF += t * _floorW[i];
+                    sumPole += p * _floorW[i];
+                    sumLevel += level * _floorW[i];
+                }
+                float k = Mathf.Clamp01(floorW);
+                seatF = Vector3.Lerp(seatF, sumF / floorW, k);
+                pole = Vector3.Lerp(fwd * kf, sumPole / floorW, k);
+                footLevel = Mathf.Lerp(1f, sumLevel / floorW, k);
+            }
+            // Straddling a spar: each leg down its own side, spread clear of the spar, knees a little forward.
+            if (_straddle01 > 0.001f)
+            {
+                Vector3 straddleF = h + outward * 0.16f + fwd * (a * 0.3f + swing * 0.5f) - Vector3.up * ((a + b) * 0.82f);
+                seatF = Vector3.Lerp(seatF, straddleF, _straddle01);
+            }
+            // Turning on the seat: knees drawn up and feet lifted to hip height, clear of the rail being swung over.
+            if (_tuck > 0.001f)
+            {
+                Vector3 tuckF = h + fwd * (a * 0.55f) + outward * 0.04f + Vector3.up * 0.06f;
+                seatF = Vector3.Lerp(seatF, tuckF, _tuck);
+            }
+            Vector3 F = Vector3.Lerp(standF, seatF, _seat01);
+            Vector3 local = Quaternion.Inverse(frame) * _root.InverseTransformPoint(F);
+            footLoose |= _straddle01 > 0.5f || _tuck > 0.5f;
+            float footBlend = (footLoose ? 0.4f : footLevel) * _seat01;
+            if (_seat01 < 1f && pole != Vector3.zero) pole = Vector3.Lerp(fwd * kf, pole, _seat01);
+            SolveLegIk(_root, hip, knee, a, b, local, thighAim, shinAim, kf, Vector3.zero, foot, footRotRoot, footBind,
+                footBlend, Vector3.zero, frame, pole);
+        }
+
+        /// <summary>
+        /// The interaction this body is showing this frame. An explicit SetInteraction wins; otherwise a fresh
+        /// held item means carrying. Anything stale is None, which lowers the arms.
+        /// </summary>
+        private InteractionKind EffectiveInteraction()
+        {
+            bool enabled = InteractionTuning.Enabled != null && InteractionTuning.Enabled.Value;
+            if (Time.frameCount - _ixFrame <= 1 && _ixTarget != null && _ixKind != InteractionKind.None)
+                return enabled ? _ixKind : InteractionKind.None;
+            if (_heldItem != null && Time.frameCount - _heldFrame <= 1)
+                return enabled && HeldToolPose.Mode != null && HeldToolPose.Mode.Value != HeldPoseMode.Off ? InteractionKind.Carry : InteractionKind.None;
+            return InteractionKind.None;
+        }
+
+        private static bool IsCarry(InteractionKind k)
+        {
+            return k == InteractionKind.Carry || k == InteractionKind.CarryBig;
+        }
+
+        /// <summary>
+        /// Where the body stands and which way it faces while using a control, eased. Only fixed controls move
+        /// the body: the player stands still while operating one, and often clicked it from farther away than an
+        /// arm can reach, or from right up against it.
+        ///
+        /// A wheel or winch places the body from its HUB, never from the handles. The handles go round, and a
+        /// body placed from them walks round in a circle with every turn of the crank.
+        /// </summary>
+        private void UpdateInteractionPlacement(float dt, bool bodyOffset)
+        {
+            var kind = EffectiveInteraction();
+            Vector3 targetOffset = Vector3.zero;
+            float targetYaw = 0f;
+
+            bool rotor = (kind == InteractionKind.Helm || kind == InteractionKind.Crank) && _ixTarget != null && _armR.Ready;
+            if (rotor)
+            {
+                rotor = _rotor.Update(_ixTarget, _root.position, Mathf.Max(0f, _shoulderMidRoot.z), _armR.Length, dt);
+            }
+            else if (_rotor.Active)
+            {
+                _rotor.Release();
+            }
+
+            if (bodyOffset && _armR.Ready)
+            {
+                float cap = InteractionTuning.StepInMaxMeters.Value;
+                if (rotor)
+                {
+                    Vector3 stand = _root.InverseTransformPoint(_rotor.StandPoint);
+                    stand.y = 0f;
+                    if (cap > 0f) targetOffset = Vector3.ClampMagnitude(stand, cap);
+                    Vector3 face = _root.InverseTransformPoint(_rotor.Hub) - targetOffset;
+                    face.y = 0f;
+                    if (InteractionTuning.TurnToFace.Value && face.sqrMagnitude > 1e-4f)
+                        targetYaw = Mathf.Clamp(Mathf.Atan2(face.x, face.z) * Mathf.Rad2Deg, -170f, 170f);
+                }
+                else if (kind == InteractionKind.Push && _ixTarget != null)
+                {
+                    Vector3 l, r;
+                    InteractionGeometry.Push(_ixTarget, _root.TransformPoint(_shoulderMidRoot), _root.right, out l, out r);
+                    Vector3 m = _root.InverseTransformPoint((l + r) * 0.5f);
+                    Vector3 flat = new Vector3(m.x, 0f, m.z);
+                    if (InteractionTuning.TurnToFace.Value && flat.sqrMagnitude > 1e-4f)
+                        targetYaw = Mathf.Clamp(Mathf.Atan2(m.x, m.z) * Mathf.Rad2Deg, -160f, 160f);
+                    float reach = _armR.Length * InteractionTuning.ReachFraction.Value;
+                    float dy = m.y - _shoulderMidRoot.y;
+                    float reachFlat = Mathf.Sqrt(Mathf.Max(reach * reach - dy * dy, 0.04f * reach * reach));
+                    float need = flat.magnitude - reachFlat;
+                    if (need > 0f && cap > 0f && flat.sqrMagnitude > 1e-4f)
+                        targetOffset = flat.normalized * Mathf.Min(need, cap);
                 }
             }
 
-            Vector3 pole = -_root.up * HeldToolPose.ElbowDown.Value + _root.right * HeldToolPose.ElbowOut.Value;
-            _armR.Solve(_armTarget, pole, holding ? 1f : 0f, HeldToolPose.BlendSpeed.Value, dt);
+            float ease = 1f - Mathf.Exp(-(InteractionTuning.BlendSpeed != null ? InteractionTuning.BlendSpeed.Value : 9f) * dt);
+            _ixOffset = Vector3.Lerp(_ixOffset, targetOffset, ease);
+            _ixYaw = Mathf.LerpAngle(_ixYaw, targetYaw, ease);
+        }
 
-            if (holding && PlacesHeldItemInHand && _armR.Hand != null && _heldItem != null)
+        /// <summary>Chest, head, mouth and facing of this body right now, for posing an item against it.</summary>
+        private BodyFrame BuildFrame(Vector3 chest)
+        {
+            Vector3 fwd = _instance.transform.forward;
+            fwd.y = 0f;
+            if (fwd.sqrMagnitude < 1e-4f) { fwd = _root.forward; fwd.y = 0f; }
+            if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward;
+            fwd.Normalize();
+            Quaternion yaw = Quaternion.LookRotation(fwd, Vector3.up);
+            Vector3 head = _bHead != null ? _bHead.position : chest + Vector3.up * 0.25f;
+            return new BodyFrame
             {
-                Quaternion rot = _heldRot * Quaternion.Euler(HeldToolPose.GripPitch.Value, HeldToolPose.GripYaw.Value, HeldToolPose.GripRoll.Value);
-                Vector3 pos = _armR.Hand.position + rot * new Vector3(HeldToolPose.GripX.Value, HeldToolPose.GripY.Value, HeldToolPose.GripZ.Value);
-                _heldItem.position = pos;
-                _heldItem.rotation = rot;
-                if (_heldFollower != null)
+                Chest = chest,
+                Head = head,
+                Mouth = head + fwd * ItemPoseTuning.MouthForward.Value + Vector3.up * ItemPoseTuning.MouthUp.Value,
+                Eye = head + fwd * 0.08f + Vector3.up * 0.09f,
+                Feet = _root.TransformPoint(new Vector3(_ixOffset.x, FittedFeetLocalY, _ixOffset.z)),
+                Right = yaw * Vector3.right,
+                Forward = fwd,
+                Yaw = yaw,
+                LookPitch = _lookPitch,
+                HasPointer = _heldView != null,
+                PointerRot = _heldView != null ? _heldView.rotation : Quaternion.identity,
+            };
+        }
+
+        /// <summary>
+        /// Both arms, once per frame, after the gait, crouch and look-lean have posed them. Each hand has a grip:
+        /// a palm position and the direction its fingers and palm face. Each arm blends from the walk pose toward
+        /// its grip by its own eased weight, so hands rise onto a control or item and drop off it smoothly, and a
+        /// claim on an arm simply skips it.
+        /// </summary>
+        private void DriveArms(float dt, bool armL, bool armR)
+        {
+            var kind = EffectiveInteraction();
+            CurrentInteraction = kind;
+            _itemPoseValid = false;
+            if (!_armR.Ready && !_armL.Ready) return;
+
+            Transform body = _instance.transform;
+            Vector3 bodyRight = body.right, bodyUp = body.up, bodyFwd = body.forward;
+            // A ragdoll's chest is wherever the fall put it, not where the body's own transform stands.
+            if (_rag01 > 0.3f && _bSpine != null)
+            {
+                bodyUp = _bSpine.rotation * _chestUpLocal;
+                bodyFwd = _bSpine.rotation * _chestFwdLocal;
+                bodyRight = Vector3.Cross(bodyUp, bodyFwd).normalized;
+            }
+            Vector3 chest = (_bShoulderL != null && _bShoulderR != null)
+                ? (_bShoulderL.position + _bShoulderR.position) * 0.5f
+                : body.position + bodyUp * (MeasuredHeight * 0.8f);
+
+            HandGrip gr = default(HandGrip), gl = default(HandGrip);
+            bool carry = IsCarry(kind);
+
+            switch (kind)
+            {
+                case InteractionKind.Carry:
+                case InteractionKind.CarryBig:
+                    if (HeldToolPose.Mode.Value == HeldPoseMode.HandReachesItem)
+                    {
+                        gr = new HandGrip { On = true, Palm = _heldPos, Normal = -bodyRight, Finger = bodyFwd };
+                    }
+                    else
+                    {
+                        var profile = ItemPoses.Profile(_heldItem);
+                        if (profile != null)
+                        {
+                            ItemPoses.Solve(profile, _heldPos, _heldRot, BuildFrame(chest), dt, out _itemPose);
+                            _itemPoseValid = true;
+                            gr = _itemPose.R;
+                            gl = _itemPose.L;
+                        }
+                    }
+                    break;
+
+                case InteractionKind.Rope:
                 {
-                    _heldFollower.position = pos;
-                    _heldFollower.rotation = rot;
+                    Vector3 l, r;
+                    InteractionGeometry.Rope(_ixTarget.position, chest, bodyFwd, bodyRight, out l, out r);
+                    Vector3 along = (r - l).sqrMagnitude > 1e-6f ? (r - l).normalized : bodyFwd;
+                    gr = new HandGrip { On = true, Palm = r, Normal = -bodyRight, Finger = bodyFwd, Axis = along };
+                    gl = new HandGrip { On = true, Palm = l, Normal = bodyRight, Finger = bodyFwd, Axis = along };
+                    // The rope end or the length adjuster is drawn in the leading hand, not a meter out in front.
+                    _itemPose = new ItemPoseResult { Repose = true, Pos = r, Rot = _ixTarget.rotation, ScaleMul = Vector3.one, R = gr, L = gl };
+                    _itemPoseValid = true;
+                    break;
                 }
+
+                case InteractionKind.Helm:
+                case InteractionKind.Crank:
+                    if (_rotor.Active)
+                    {
+                        gr = new HandGrip { On = true, Palm = _rotor.PalmR, Normal = _rotor.NormalR, Finger = _rotor.FingerR, Axis = _rotor.AxisR };
+                        gl = new HandGrip { On = true, Palm = _rotor.PalmL, Normal = _rotor.NormalL, Finger = _rotor.FingerL, Axis = _rotor.AxisL };
+                    }
+                    break;
+
+                case InteractionKind.Push:
+                {
+                    Vector3 l, r;
+                    InteractionGeometry.Push(_ixTarget, chest, bodyRight, out l, out r);
+                    gr = new HandGrip { On = true, Palm = r, Normal = bodyFwd, Finger = bodyUp };
+                    gl = new HandGrip { On = true, Palm = l, Normal = bodyFwd, Finger = bodyUp };
+                    break;
+                }
+            }
+
+            // Seated with nothing in a hand: that hand rests on its thigh, near the knee. Straddling a spar, both
+            // hands hold it in front; turning on the seat, they push down on it beside the hips.
+            if (_seat01 > 0.5f && _legIkReady && _rag01 <= 0.3f && _getUp01 <= 0.3f)
+            {
+                Quaternion seatRot = _root.rotation * SeatYaw();
+                Vector3 seatFwd = seatRot * Vector3.forward, seatRight = seatRot * Vector3.right;
+                Vector3 hips = SeatHipsDrawn();
+                if (!gr.On && _bUpperLegR != null && _bLowerLegR != null)
+                    gr = SeatedHand(true, hips, seatFwd, seatRight);
+                if (!gl.On && _bUpperLegL != null && _bLowerLegL != null)
+                    gl = SeatedHand(false, hips, seatFwd, -seatRight);
+            }
+
+            float blendSpeed = carry ? HeldToolPose.BlendSpeed.Value : InteractionTuning.BlendSpeed.Value;
+            float down = carry ? HeldToolPose.ElbowDown.Value : InteractionTuning.ElbowDown.Value;
+            float outward = carry ? HeldToolPose.ElbowOut.Value : InteractionTuning.ElbowOut.Value;
+            Vector3 poleR = -bodyUp * down + bodyRight * outward, poleL = -bodyUp * down - bodyRight * outward;
+
+            // Down: the arms go over the face or head, or fling out, on top of the ragdoll's own arms.
+            if (_rag01 > 0.3f)
+            {
+                gr = gl = default(HandGrip);
+                ReactionHands(dt, ref gr, ref gl, ref poleR, ref poleL);
+                blendSpeed = 10f;
+            }
+            // Getting up: hands on the floor to push up, then on the knees, then letting go.
+            else if (_getUp01 > 0.3f)
+            {
+                gr = gl = default(HandGrip);
+                if (_guHandW > 0.35f)
+                {
+                    gr = new HandGrip { On = true, Palm = _guHandR, Normal = Vector3.down, Finger = (_guHandR - chest).normalized };
+                    gl = new HandGrip { On = true, Palm = _guHandL, Normal = Vector3.down, Finger = (_guHandL - chest).normalized };
+                }
+                poleR = -bodyUp + bodyRight * 0.6f;
+                poleL = -bodyUp - bodyRight * 0.6f;
+                blendSpeed = 10f;
+            }
+            // Swimming with nothing in the hands: sculling, or the crawl.
+            else if (_swim01 > 0.3f && !carry && _bShoulderR != null && _bShoulderL != null)
+            {
+                float stroke = SwimStroke(0f);
+                gr = SwimHand(_bShoulderR.position, bodyUp, bodyFwd, bodyRight, stroke);
+                gl = SwimHand(_bShoulderL.position, bodyUp, bodyFwd, -bodyRight, stroke);
+                // Elbows out to the sides and a little toward the feet, never through the chest.
+                poleR = (bodyRight - bodyUp * 0.4f).normalized;
+                poleL = (-bodyRight - bodyUp * 0.4f).normalized;
+                blendSpeed = 12f;
+            }
+            float wrist = ItemPoseTuning.MaxWristBend.Value;
+
+            float itemTarget = (carry || kind == InteractionKind.Rope) && _itemPoseValid && _itemPose.Repose ? 1f : 0f;
+            _itemBlend = Mathf.Lerp(_itemBlend, itemTarget, 1f - Mathf.Exp(-blendSpeed * dt));
+
+            // An arm that lets go lowers along the path it came up on.
+            if (gr.On) _lastGripR = gr;
+            if (gl.On) _lastGripL = gl;
+
+            // Each hand starts every frame hanging relaxed, palm to the thigh; a grip blends it from there.
+            if (armR && _armR.Ready)
+            {
+                _armR.RestHand(-bodyRight, bodyFwd);
+                _armR.SolveGrip(_lastGripR.Palm, _lastGripR.Finger, _lastGripR.Normal, _lastGripR.Axis,
+                    poleR, gr.On ? 1f : 0f, blendSpeed, dt, wrist);
+            }
+            if (armL && _armL.Ready)
+            {
+                _armL.RestHand(bodyRight, bodyFwd);
+                _armL.SolveGrip(_lastGripL.Palm, _lastGripL.Finger, _lastGripL.Normal, _lastGripL.Axis,
+                    poleL, gl.On ? 1f : 0f, blendSpeed, dt, wrist);
+            }
+
+            // A crewmate's item is written here; the local body draws its own at render time instead.
+            if (carry && _itemPoseValid && _itemPose.Repose && !HeldItemRenderOnly && _heldItem != null && PlacesHeldItemInHand)
+            {
+                Vector3 p = Vector3.Lerp(_heldPos, _itemPose.Pos, _itemBlend);
+                Quaternion q = Quaternion.Slerp(_heldRot, _itemPose.Rot, _itemBlend);
+                _heldItem.SetPositionAndRotation(p, q);
+                if (_heldFollower != null) _heldFollower.SetPositionAndRotation(p, q);
+            }
+        }
+
+        /// <summary>
+        /// Where an empty hand rests while seated: on the thigh near the knee, on a straddled spar in front of the
+        /// hips, pressed on the seat beside the hips while turning, or as the floor pose has it. The seat surface is
+        /// a hip-joint height below the hips, which is how Seating places them. Called after the legs are posed, so
+        /// the knees are where they are drawn.
+        /// </summary>
+        private HandGrip SeatedHand(bool right, Vector3 hips, Vector3 fwd, Vector3 outward)
+        {
+            Transform upper = right ? _bUpperLegR : _bUpperLegL, lower = right ? _bLowerLegR : _bLowerLegL;
+            Vector3 palm = Vector3.Lerp(upper.position, lower.position, 0.72f) + Vector3.up * 0.08f;
+            Vector3 normal = Vector3.down, finger = fwd;
+            if (_straddle01 > 0.001f)
+                palm = Vector3.Lerp(palm, hips + fwd * 0.2f + outward * 0.07f - Vector3.up * 0.06f, _straddle01);
+
+            float floorW = FloorWeight();
+            if (floorW > 0.001f)
+            {
+                Vector3 sumPalm = Vector3.zero, sumNormal = Vector3.zero, sumFinger = Vector3.zero;
+                for (int i = 0; i < _floorW.Length; i++)
+                {
+                    if (_floorW[i] < 0.001f) continue;
+                    Vector3 p, n, f;
+                    FloorHand(i, right, hips, fwd, outward, lower.position, out p, out n, out f);
+                    sumPalm += p * _floorW[i];
+                    sumNormal += n * _floorW[i];
+                    sumFinger += f * _floorW[i];
+                }
+                float k = Mathf.Clamp01(floorW);
+                palm = Vector3.Lerp(palm, sumPalm / floorW, k);
+                if (sumNormal.sqrMagnitude > 1e-6f) normal = Vector3.Slerp(normal, sumNormal.normalized, k);
+                if (sumFinger.sqrMagnitude > 1e-6f) finger = Vector3.Slerp(finger, sumFinger.normalized, k);
+            }
+
+            if (_tuck > 0.001f)
+            {
+                palm = Vector3.Lerp(palm, hips + outward * 0.24f - fwd * 0.02f - Vector3.up * 0.08f, _tuck);
+                normal = Vector3.Slerp(normal, Vector3.down, _tuck);
+                finger = Vector3.Slerp(finger, fwd, _tuck);
+            }
+            return new HandGrip { On = true, Palm = palm, Normal = normal, Finger = finger };
+        }
+
+        /// <summary>One hand for one floor pose: the palm, the way the palm faces, and the way the fingers point.</summary>
+        private void FloorHand(int pose, bool right, Vector3 hips, Vector3 fwd, Vector3 outward, Vector3 knee,
+            out Vector3 palm, out Vector3 normal, out Vector3 finger)
+        {
+            // Both knees, for a hug round the pair of them.
+            Vector3 knees = _bLowerLegL != null && _bLowerLegR != null ? (_bLowerLegL.position + _bLowerLegR.position) * 0.5f : knee;
+            // Flat on the floor behind and beside the hips, fingers out and back, taking the weight of a lean.
+            Vector3 behind = hips - fwd * 0.16f + outward * 0.2f;
+            behind.y = _seatFloorY + 0.03f;
+            switch (pose)
+            {
+                case 0:   // legs out: leaning back on both hands
+                    palm = behind; normal = Vector3.down; finger = (outward - fwd * 0.5f).normalized;
+                    break;
+                case 1:   // cross-legged: hands resting on the knees
+                    palm = knee + Vector3.up * 0.07f - fwd * 0.02f; normal = Vector3.down; finger = fwd;
+                    break;
+                case 2:   // one knee up: that arm hung over the knee, the other hand behind on the floor
+                    if (right) { palm = knee + fwd * 0.08f - Vector3.up * 0.07f; normal = -fwd; finger = (fwd * 0.5f - Vector3.up).normalized; }
+                    else { palm = behind; normal = Vector3.down; finger = (outward - fwd * 0.5f).normalized; }
+                    break;
+                default:  // knees hugged: both hands clasped in front of the shins
+                    palm = knees + fwd * 0.08f - Vector3.up * 0.12f + outward * 0.04f; normal = -fwd; finger = -outward;
+                    break;
             }
         }
 
@@ -770,7 +2330,8 @@ namespace SailwindPlayerModel
         /// </summary>
         private static void SolveLegIk(Transform root, Transform hip, Transform knee,
             float thighLen, float shinLen, Vector3 footLocal, Vector3 thighAimLocal, Vector3 shinAimLocal, float kneeForwardSign,
-            Vector3 stepOffset, Transform foot, Quaternion footRotRoot, Quaternion footLocalBind, float crouch)
+            Vector3 stepOffset, Transform foot, Quaternion footRotRoot, Quaternion footLocalBind, float crouch,
+            Vector3 frameOffsetLocal, Quaternion frameYaw, Vector3 poleWorld = default(Vector3))
         {
             if (hip == null || knee == null) return;
             float a = thighLen, b = shinLen;
@@ -779,7 +2340,8 @@ namespace SailwindPlayerModel
             Vector3 H = hip.position;                    // dropped hip
             // Standing ankle target (moves with the body and boat, not with the drop) PLUS a per-frame step
             // offset so the feet actually stride while crouch-walking (0 when standing = a planted crouch).
-            Vector3 F = root.TransformPoint(footLocal) + stepOffset;
+            // The standing spot turns and steps with the body when it is using a control (identity otherwise).
+            Vector3 F = root.TransformPoint(frameOffsetLocal + frameYaw * footLocal) + stepOffset;
             Vector3 hf = F - H;
             float d = Mathf.Clamp(hf.magnitude, Mathf.Abs(a - b) + 1e-3f, a + b - 1e-3f);
             Vector3 dir = hf.sqrMagnitude > 1e-8f ? hf.normalized : -root.up; // hip to foot (normally downward)
@@ -788,8 +2350,9 @@ namespace SailwindPlayerModel
             float cosH = Mathf.Clamp((a * a + d * d - b * b) / (2f * a * d), -1f, 1f);
             float hipAngle = Mathf.Acos(cosH);
 
-            // Pole = body forward, projected perpendicular to dir, so the knee points forward = a squat.
-            Vector3 fwd = root.forward * kneeForwardSign;
+            // Pole = body forward, projected perpendicular to dir, so the knee points forward = a squat. A caller
+            // can point the knee elsewhere: up for a knee drawn to the chest, out to the side for cross-legged.
+            Vector3 fwd = poleWorld.sqrMagnitude > 1e-6f ? poleWorld : (root.rotation * frameYaw * Vector3.forward) * kneeForwardSign;
             Vector3 pole = fwd - Vector3.Dot(fwd, dir) * dir;
             if (pole.sqrMagnitude < 1e-6f) pole = root.up - Vector3.Dot(root.up, dir) * dir; // degenerate guard
             if (pole.sqrMagnitude < 1e-6f) { pole = Vector3.up; }
@@ -829,7 +2392,7 @@ namespace SailwindPlayerModel
             if (foot != null)
             {
                 foot.localRotation = footLocalBind;
-                Quaternion level = root.rotation * footRotRoot;
+                Quaternion level = root.rotation * frameYaw * footRotRoot;
                 foot.rotation = Quaternion.Slerp(foot.rotation, level, Mathf.Clamp01(crouch));
             }
         }
