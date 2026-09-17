@@ -46,6 +46,7 @@ namespace SailwindPlayerModel
         private const float EyeAbovePivot = 0.25f;
         private const float MinDistance = 1.2f, MaxDistance = 12f;
         private const float TurnDegreesPerSecond = 720f;
+        private const int UiLayer = 5, InvisLayer = 16;
 
         private static readonly AccessTools.FieldRef<BoatCamera, Transform> CenterEyeRef =
             AccessTools.FieldRefAccess<BoatCamera, Transform>("centerEye");
@@ -179,7 +180,7 @@ namespace SailwindPlayerModel
             rig.position = pivot;
             Vector3 from = pitch.TransformPoint(new Vector3(0f, EyeAbovePivot, 0f));
             Vector3 want = pitch.TransformPoint(new Vector3(0f, EyeAbovePivot, -Mathf.Max(_distance, MinDistance)));
-            want = from + (want - from).normalized * ClearDistance(from, want);
+            want = from + (want - from).normalized * ClearDistance(from, want, rig);
             if (!PlayerSwimming.swimming)
             {
                 float water = PlayerSwimming.cameraWaterHeight + 0.3f;
@@ -191,29 +192,31 @@ namespace SailwindPlayerModel
         private static readonly RaycastHit[] _hits = new RaycastHit[24];
 
         /// <summary>How far the eye can go from <paramref name="from"/> toward <paramref name="to"/> before something solid, in both copies of a boat.</summary>
-        private static float ClearDistance(Vector3 from, Vector3 to)
+        private static float ClearDistance(Vector3 from, Vector3 to, Transform rig)
         {
             Vector3 d = to - from;
             float length = d.magnitude;
             if (length < 1e-3f) return 0f;
             Vector3 dir = d / length;
-            float clear = Cast(from, dir, length, false);
+            float clear = Cast(from, dir, length, false, rig);
             Transform visual = Refs.observerMirror.transform.parent;
             Transform walk = Refs.charController != null ? Refs.charController.transform.parent : null;
             if (visual != null && walk != null && visual != walk && GameState.currentBoat != null)
             {
                 Vector3 wFrom = walk.TransformPoint(visual.InverseTransformPoint(from));
                 Vector3 wDir = walk.TransformDirection(visual.InverseTransformDirection(dir));
-                clear = Mathf.Min(clear, Cast(wFrom, wDir, length, true));
+                clear = Mathf.Min(clear, Cast(wFrom, wDir, length, true, rig));
             }
             return Mathf.Max(0.3f, clear);
         }
 
-        private static float Cast(Vector3 from, Vector3 dir, float length, bool walkCopy)
+        private static float Cast(Vector3 from, Vector3 dir, float length, bool walkCopy, Transform rig)
         {
             const float radius = 0.2f, margin = 0.08f;
-            // Docks and some other scenery sit on Ignore Raycast (see Seating.SeatLayers).
-            int n = Physics.SphereCastNonAlloc(from, radius, dir, _hits, length, Seating.SeatLayers, QueryTriggerInteraction.Ignore);
+            // Docks and some other scenery sit on Ignore Raycast (see Seating.SeatLayers). The UI layer and the layer the game
+            // puts stowed inventory items on are left out: the inventory and needs panels hang off the camera, and counting
+            // them pulled the camera in, which moved the panels in with it, over and over, into a zoom that never stopped.
+            int n = Physics.SphereCastNonAlloc(from, radius, dir, _hits, length, Seating.SeatLayers & ~((1 << UiLayer) | (1 << InvisLayer)), QueryTriggerInteraction.Ignore);
             float best = length;
             Transform walkRoot = walkCopy && Refs.charController != null ? Refs.charController.transform.parent : null;
             for (int i = 0; i < n; i++)
@@ -223,6 +226,7 @@ namespace SailwindPlayerModel
                 if (c.gameObject.layer == 2 && !Seating.IsStaticScenery(c)) continue;
                 if (Refs.charController != null && c.transform.IsChildOf(Refs.charController.transform)) continue;
                 if (c.transform.IsChildOf(Refs.observerMirror.transform)) continue;
+                if (rig != null && c.transform.IsChildOf(rig)) continue;   // anything riding along with the camera
                 if (walkCopy && (walkRoot == null || !c.transform.IsChildOf(walkRoot))) continue;
                 best = Mathf.Min(best, _hits[i].distance - margin);
             }

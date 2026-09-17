@@ -22,7 +22,7 @@ namespace SailwindPlayerModel
         public const string PluginName = "Sailwind Player Model";
         // BepInEx 5 parses this as a strict System.Version. No SemVer suffixes, or the plugin silently fails
         // to load with no error.
-        public const string PluginVersion = "0.1.3";
+        public const string PluginVersion = "0.1.4";
 
         public static ManualLogSource Log;
 
