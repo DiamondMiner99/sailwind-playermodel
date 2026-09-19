@@ -59,13 +59,51 @@ namespace SailwindPlayerModel
         private static readonly AccessTools.FieldRef<RopeEffect, ClothRope> ClothRopeRef =
             AccessTools.FieldRefAccess<RopeEffect, ClothRope>("clothRope");
 
+        // Skinned meshes with per-render skinning on, for the item drawn in the hands. See SyncRenderSkins.
+        private readonly System.Collections.Generic.List<SkinnedMeshRenderer> _forcedSkins = new System.Collections.Generic.List<SkinnedMeshRenderer>();
+        private Transform _forcedFor;
+
+        // The same for the cloth rope drawn from a held rope or rod line. See SyncClothSkin.
+        private Transform _clothFor;
+        private RopeEffect _forcedRope;
+        private SkinnedMeshRenderer _forcedCloth;
+
+        // World-space particle emitters on the item drawn in the hands (a lit pipe's smoke). See SyncEmitters.
+        private sealed class HeldEmitter
+        {
+            public Transform T;
+            public ParticleSystem PS;
+            public Vector3 LocalPos, DrawnPos, LeftPos;
+            public Quaternion LocalRot, DrawnRot, LeftRot;
+            public bool Left;      // on the drawn spot now
+            public bool SeenLeft;  // on the drawn spot for the last particle update
+        }
+        private readonly System.Collections.Generic.List<HeldEmitter> _emitters = new System.Collections.Generic.List<HeldEmitter>();
+        private readonly System.Collections.Generic.List<ParticleSystem> _emitterScan = new System.Collections.Generic.List<ParticleSystem>();
+        private Transform _emittersFor;
+        private bool _emittersDrawn;     // read where the drawn item holds them, to be left there once the item is put back
+        private bool _emittersMoved;     // off their stock local poses
+        private bool _emittersFailed;
+
+        // Particle systems with inherited velocity turned off for the next particle update. See HoldInherit.
+        private readonly System.Collections.Generic.List<ParticleSystem> _inheritHeld = new System.Collections.Generic.List<ParticleSystem>(4);
+        private bool _inheritFailed;
+
+        // The game's pipe exhale, and its stock local pose. See PlaceExhale.
+        private Transform _exhale;
+        private Vector3 _exhaleLocalPos;
+        private Quaternion _exhaleLocalRot;
+        private bool _exhaleMoved;
+        private bool _exhaleFailed;
+
         private void Awake() { Instance = this; }
         private void OnDestroy() { if (Instance == this) Instance = null; }
         private void OnEnable() { Application.onBeforeRender += OnBeforeRender; }
-        private void OnDisable() { Application.onBeforeRender -= OnBeforeRender; RestoreHeld(); }
+        private void OnDisable() { Application.onBeforeRender -= OnBeforeRender; RestoreHeld(); ReleaseRenderSkins(); ReleaseEmitters(); RestoreInherit(); RestoreExhale(); }
 
         private void LateUpdate()
         {
+            NoteParticleUpdate();
             try
             {
                 if (!GameState.playing) { Teardown(); return; }
@@ -83,20 +121,30 @@ namespace SailwindPlayerModel
                 PlaceRoot(cc);
                 _body.SpeedMps = SampleDeckSpeed(cc);
                 _body.Crouch01Target = VanillaPlayer.Crouch01();
-                _body.LookPitchDegTarget = VanillaPlayer.HeadLookPitchDeg();
+                // The look lock freezes where the body looks as well as which way it faces, so the pitch holds
+                // the value it had when the lock went on and the camera orbits without tilting the body.
+                if (!PlayerOrbitCamera.LookLocked) _body.LookPitchDegTarget = VanillaPlayer.HeadLookPitchDeg();
                 FeedRest();
                 if (BodyTuning.SwimAnimation.Value && PlayerSwimming.swimming && !Downed.HoldsView)
                     _body.SetSwimming(!PlayerSwimming.swimmingOnSurface, _deckVelocity);
                 bool visible = ForcedVisible || (BoatCamera.on && GameState.currentShipyard == null);
-                // Sitting in first person: your own body from the chest down, fading in below the shoulders.
+                // Sitting in first person: your own body from the chest down, fading in below the shoulders. Not while
+                // something else has moved the view off the seat (a Three Sheets blackout fall), which would look back at it.
                 bool chest = !visible && Seating.IsSeated && GameState.currentShipyard == null
-                    && SeatingTuning.ShowBodyWhenSeated.Value && BodyShaders.SeatedFade != null;
+                    && SeatingTuning.ShowBodyWhenSeated.Value && BodyShaders.SeatedFade != null && !Seating.EyeDisplaced;
                 FeedInteraction(visible, chest);
+                // Before Tick, so a throw there cannot leave an item moved at render time without its skinning. With
+                // Interactions off the body never moves the item, so nothing needs it.
+                Transform drawnItem = InteractionTuning.Enabled != null && InteractionTuning.Enabled.Value ? _renderHeld : null;
+                SyncRenderSkins(drawnItem);
+                SyncEmitters(drawnItem);
                 _body.Tick(Time.deltaTime);
+                // After Tick, from where the head is posed this frame.
+                PlaceExhale(visible && BoatCamera.on);
 
                 // After the pose, so the fade starts from where the shoulders are this frame.
                 if (chest) _body.SetChestFade(BodyShaders.SeatedFade, SeatingTuning.BodyFadeBelowShoulders.Value, SeatingTuning.BodyFadeAboveHips.Value);
-                else if (_body.ChestFadeOn) _body.ClearChestFade();
+                else _body.EndChestFade();
                 SetVisible(visible || chest, visible);
                 _scorchFromView = !visible && (Seating.Smoke01 > 0f || Seating.Fire01 > 0f || Seating.Steam01 > 0f);
 
@@ -109,7 +157,12 @@ namespace SailwindPlayerModel
                         _tagObject.transform.rotation = Camera.main.transform.rotation;
                 }
             }
-            catch (System.Exception e) { Plugin.Log.LogError("[LocalBody] " + e); }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogError("[LocalBody] " + e);
+                // The exhale is only placed after a pose that completed; left at an old spot it would stay there.
+                RestoreExhale();
+            }
         }
 
         /// <summary>
@@ -215,7 +268,13 @@ namespace SailwindPlayerModel
                     // for it lower down would hold nothing: they rest instead.
                     if (chestView) break;
                     var pointer = LocalInteraction.Pointer;
-                    _body.SetHeldItem(held.transform, null, held.transform.position, held.transform.rotation, held.big,
+                    Quaternion heldRot = held.transform.rotation;
+                    // This runs before GoPointer places the item, so the item still has last frame's hold, on last
+                    // frame's pointer (and moved with the boat since). Put that hold on this frame's pointer, the view
+                    // the pose compares it against.
+                    if (pointer != null && PointerPlaced.Frame == Time.frameCount - 1 && PointerPlaced.Item == held)
+                        heldRot = pointer.transform.rotation * PointerPlaced.Hold;
+                    _body.SetHeldItem(held.transform, null, held.transform.position, heldRot, held.big,
                         pointer != null ? pointer.transform : null);
                     // Only draw it in the hands while the body can be seen. In first person the item stays where
                     // the game frames it for you.
@@ -254,25 +313,39 @@ namespace SailwindPlayerModel
                 _body.MoveScorch(observer.position + Vector3.down * 0.05f + back * 0.08f);
             }
 
-            if (_renderHeld == null || _body == null || _restoreT != null) return;
-            Vector3 pos; Quaternion rot; Vector3 scaleMul;
-            if (!_body.TryGetItemRenderPose(_renderHeld.position, _renderHeld.rotation, out pos, out rot, out scaleMul)) return;
-            _restoreT = _renderHeld;
-            _restorePos = _renderHeld.position;
-            _restoreRot = _renderHeld.rotation;
-            _restoreScale = _renderHeld.localScale;
-            // A fishing rod's line hangs from its tip, which moves with the rod rather than with the item's origin.
-            Transform rodTip, rodLine;
-            bool rod = ItemPoses.RodLine(_renderHeld, out rodTip, out rodLine);
-            Vector3 tipBefore = rod ? rodTip.position : Vector3.zero;
-            _renderHeld.SetPositionAndRotation(pos, rot);
-            if (scaleMul != Vector3.one) _renderHeld.localScale = Vector3.Scale(_restoreScale, scaleMul);
-            if (rod) BendRopeEnd(rodLine, tipBefore, rodTip.position);
-            else BendRopeEnd(_renderHeld, _restorePos, pos);
-            if (!_restorePending)
+            if (_restoreT != null) return;
+            // Emitters left where last frame's drawn item held them go back on their stock local poses first, so this
+            // frame's are read from the item as drawn now, and an item not drawn this frame emits from its own place.
+            StockEmitters();
+            try
             {
-                _restorePending = true;
-                StartCoroutine(RestoreAtEndOfFrame());
+                if (_renderHeld == null || _body == null) return;
+                Vector3 pos; Quaternion rot; Vector3 scaleMul;
+                if (!_body.TryGetItemRenderPose(_renderHeld.position, _renderHeld.rotation, out pos, out rot, out scaleMul)) return;
+                _restoreT = _renderHeld;
+                _restorePos = _renderHeld.position;
+                _restoreRot = _renderHeld.rotation;
+                _restoreScale = _renderHeld.localScale;
+                // A fishing rod's line hangs from its tip, which moves with the rod rather than with the item's origin.
+                Transform rodTip, rodLine;
+                bool rod = ItemPoses.RodLine(_renderHeld, out rodTip, out rodLine);
+                Vector3 tipBefore = rod ? rodTip.position : Vector3.zero;
+                _renderHeld.SetPositionAndRotation(pos, rot);
+                if (scaleMul != Vector3.one) _renderHeld.localScale = Vector3.Scale(_restoreScale, scaleMul);
+                ReadDrawnEmitters();
+                if (rod) BendRopeEnd(rodLine, tipBefore, rodTip.position);
+                else BendRopeEnd(_renderHeld, _restorePos, pos);
+                if (!_restorePending)
+                {
+                    _restorePending = true;
+                    StartCoroutine(RestoreAtEndOfFrame());
+                }
+            }
+            finally
+            {
+                // Not drawn this frame, the emitters stay on their stock poses for the next particle update. Drawn, the
+                // end of the frame leaves them and checks there.
+                if (!_emittersDrawn) HoldInheritOnJumps();
             }
         }
 
@@ -335,6 +408,7 @@ namespace SailwindPlayerModel
                 _restoreT.SetPositionAndRotation(_restorePos, _restoreRot);
                 _restoreT.localScale = _restoreScale;
             }
+            if (_emittersDrawn) LeaveEmittersDrawn();
             if (_restoreLine != null && _restoreLine.positionCount == _lineSaved.Length) _restoreLine.SetPositions(_lineSaved);
             _restoreLine = null;
             if (_restoreBones != null)
@@ -345,6 +419,314 @@ namespace SailwindPlayerModel
             }
             _restoreT = null;
             _restorePending = false;
+        }
+
+        /// <summary>
+        /// A skinned mesh takes its bones' places before OnBeforeRender, so a skinned mesh moved there, such as the
+        /// fishing rod's, only shows moved with per-render skinning; without it the hands closed on a rod that was still
+        /// drawn where the game floats it. That is an extra skinning pass per camera render, so it is kept on only for
+        /// the item this body draws in the hands, and set here in LateUpdate, before this frame's renders.
+        /// </summary>
+        private void SyncRenderSkins(Transform item)
+        {
+            if ((object)item != (object)_forcedFor)
+            {
+                ReleaseRenderSkins();
+                _forcedFor = item;
+                if (item != null)
+                {
+                    item.GetComponentsInChildren(true, _forcedSkins);
+                    for (int i = 0; i < _forcedSkins.Count; i++) _forcedSkins[i].forceMatrixRecalculationPerRender = true;
+                }
+            }
+            SyncClothSkin(item);
+        }
+
+        private void ReleaseRenderSkins()
+        {
+            for (int i = 0; i < _forcedSkins.Count; i++)
+                if (_forcedSkins[i] != null) _forcedSkins[i].forceMatrixRecalculationPerRender = false;
+            _forcedSkins.Clear();
+            _forcedFor = null;
+            ReleaseClothSkin();
+        }
+
+        /// <summary>
+        /// With the game's Cloth Ropes setting on, a rope is drawn by a ClothRope, whose bones BendRopeEnd moves at render
+        /// time too. The cloth is not under the rope item (ClothRope parents itself to the RopeEffect's parent), and a
+        /// fishing rod's cloth follows its line's RopeEffect rather than the rod, so neither is reliably among the item's
+        /// own skinned meshes. RopeEffect destroys its cloth when the setting goes off and makes a new one when it comes
+        /// back on, so the cloth is checked every frame.
+        /// </summary>
+        private void SyncClothSkin(Transform item)
+        {
+            if ((object)item != (object)_clothFor)
+            {
+                // Recorded before the lookup, so a lookup that throws is not retried every frame.
+                _clothFor = item;
+                _forcedRope = null;
+                Transform tip, line;
+                if (item != null) _forcedRope = (ItemPoses.RodLine(item, out tip, out line) ? line : item).GetComponent<RopeEffect>();
+            }
+            var cloth = _forcedRope != null ? ClothRopeRef(_forcedRope) : null;
+            var skin = cloth != null ? cloth.skinned : null;
+            if (skin != _forcedCloth)
+            {
+                if (_forcedCloth != null) _forcedCloth.forceMatrixRecalculationPerRender = false;
+                if (skin != null) skin.forceMatrixRecalculationPerRender = true;
+                _forcedCloth = skin;
+            }
+        }
+
+        private void ReleaseClothSkin()
+        {
+            if (_forcedCloth != null) _forcedCloth.forceMatrixRecalculationPerRender = false;
+            _forcedCloth = null;
+            _forcedRope = null;
+            _clothFor = null;
+        }
+
+        /// <summary>
+        /// A particle system simulating in world space leaves each new particle where its emitter was at the particle
+        /// update, which never sees the render-time move in OnBeforeRender. A lit pipe drawn in the hands therefore smoked
+        /// from where the game floats it, level with the top of the head. So each such emitter
+        /// on the drawn item is left, once the item is put back, where the drawn item holds it (see RestoreHeld), and the
+        /// next particle update emits from the drawn bowl, a frame behind. Found again only when the drawn item changes,
+        /// and set back on its stock local pose then, in any frame the item is not drawn, and on teardown.
+        ///
+        /// Only emitters that are not the item itself, carry no collider and have nothing under them: moving one moves
+        /// only the particles' source, never anything the game's physics reads.
+        ///
+        /// The particle update that sees an emitter go onto the drawn spot or back off it sees a jump of about half a
+        /// meter in one frame, which the pipe's smoke would inherit as velocity. See HoldInherit.
+        /// </summary>
+        private void SyncEmitters(Transform item)
+        {
+            if (_emittersFailed || (object)item == (object)_emittersFor) return;
+            try
+            {
+                ReleaseEmitters();
+                _emittersFor = item;
+                if (item == null) return;
+                item.GetComponentsInChildren(true, _emitterScan);
+                for (int i = 0; i < _emitterScan.Count; i++)
+                {
+                    var ps = _emitterScan[i];
+                    Transform t = ps.transform;
+                    if (ps.main.simulationSpace != ParticleSystemSimulationSpace.World) continue;
+                    if (t == item || t.childCount > 0 || t.GetComponent<Collider>() != null) continue;
+                    _emitters.Add(new HeldEmitter { T = t, PS = ps, LocalPos = t.localPosition, LocalRot = t.localRotation });
+                }
+                _emitterScan.Clear();
+            }
+            catch (System.Exception e) { FailEmitters(e); }
+        }
+
+        /// <summary>
+        /// Emitters back on their stock local poses, if they were left anywhere else. One whose local pose changed since it
+        /// was left takes that as its stock pose instead, so nothing else that places it is undone.
+        /// </summary>
+        private void StockEmitters()
+        {
+            _emittersDrawn = false;
+            if (!_emittersMoved) return;
+            _emittersMoved = false;
+            for (int i = 0; i < _emitters.Count; i++)
+            {
+                var em = _emitters[i];
+                em.Left = false;
+                try
+                {
+                    if (em.T == null) continue;
+                    if (em.T.localPosition != em.LeftPos || em.T.localRotation != em.LeftRot)
+                    {
+                        em.LocalPos = em.T.localPosition;
+                        em.LocalRot = em.T.localRotation;
+                    }
+                    em.T.localPosition = em.LocalPos;
+                    em.T.localRotation = em.LocalRot;
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>Where the item, just moved to its drawn pose, holds each emitter. Runs with the emitters on their stock local poses.</summary>
+        private void ReadDrawnEmitters()
+        {
+            if (_emittersFailed || _emitters.Count == 0 || (object)_emittersFor != (object)_renderHeld) return;
+            try
+            {
+                for (int i = 0; i < _emitters.Count; i++)
+                {
+                    var em = _emitters[i];
+                    if (em.T == null) continue;
+                    em.DrawnPos = em.T.position;
+                    em.DrawnRot = em.T.rotation;
+                }
+                _emittersDrawn = true;
+            }
+            catch (System.Exception e) { FailEmitters(e); }
+        }
+
+        /// <summary>With the item back where the game holds it, the emitters stay where the drawn item held them.</summary>
+        private void LeaveEmittersDrawn()
+        {
+            _emittersDrawn = false;
+            try
+            {
+                _emittersMoved = true;
+                for (int i = 0; i < _emitters.Count; i++)
+                {
+                    var em = _emitters[i];
+                    em.Left = false;
+                    if (em.T == null) continue;
+                    // Under an item shrunk to nothing (put in a crate or the inventory) no local pose reaches the drawn
+                    // spot, so it stays on its stock pose.
+                    Vector3 scale = em.T.parent != null ? em.T.parent.lossyScale : Vector3.one;
+                    if (Mathf.Abs(scale.x * scale.y * scale.z) < 1e-9f) continue;
+                    em.T.SetPositionAndRotation(em.DrawnPos, em.DrawnRot);
+                    em.LeftPos = em.T.localPosition;
+                    em.LeftRot = em.T.localRotation;
+                    em.Left = true;
+                }
+                // The last move before the next particle update.
+                HoldInheritOnJumps();
+            }
+            catch (System.Exception e) { FailEmitters(e); }
+        }
+
+        private void ReleaseEmitters()
+        {
+            // Held before the move back, so no particle update sees that move with inheritance on.
+            for (int i = 0; i < _emitters.Count; i++)
+                if (_emitters[i].SeenLeft) HoldInherit(_emitters[i].PS);
+            StockEmitters();
+            _emitters.Clear();
+            _emitterScan.Clear();
+            _emittersFor = null;
+        }
+
+        private void FailEmitters(System.Exception e)
+        {
+            _emittersFailed = true;
+            ReleaseEmitters();
+            RestoreInherit();
+            Plugin.Log.LogWarning("[LocalBody] Smoke from an item in the hands is left where the game has it for this session: " + e.Message);
+        }
+
+        /// <summary>
+        /// Runs after this frame's particle update. Each system held for that update gets its own setting back, and each
+        /// emitter's place is noted as the one that update saw. A frame with no time step may run no particle update, so
+        /// both wait for a frame that has one.
+        /// </summary>
+        private void NoteParticleUpdate()
+        {
+            if (Time.deltaTime <= 0f) return;
+            RestoreInherit();
+            for (int i = 0; i < _emitters.Count; i++) _emitters[i].SeenLeft = _emitters[i].Left;
+        }
+
+        /// <summary>Holds each emitter whose place for the next particle update differs from the place the last one saw.</summary>
+        private void HoldInheritOnJumps()
+        {
+            for (int i = 0; i < _emitters.Count; i++)
+                if (_emitters[i].Left != _emitters[i].SeenLeft) HoldInherit(_emitters[i].PS);
+        }
+
+        /// <summary>
+        /// Turns off inherited velocity on a particle system for the one particle update that sees its emitter jump
+        /// between where the game holds the item and where the body draws it. The pipe's smoke inherits its emitter's
+        /// velocity at birth and nothing slows it, so a particle born on that update would fly off at tens of meters a
+        /// second. Only a system whose own setting is on is changed, and NoteParticleUpdate turns it back on after that
+        /// update. A system already held reads as off, so it is never recorded twice.
+        /// </summary>
+        private void HoldInherit(ParticleSystem ps)
+        {
+            if (_inheritFailed || ps == null) return;
+            try
+            {
+                var inherit = ps.inheritVelocity;
+                if (!inherit.enabled) return;
+                inherit.enabled = false;
+                _inheritHeld.Add(ps);
+            }
+            catch (System.Exception e) { FailInherit(e); }
+        }
+
+        private void RestoreInherit()
+        {
+            if (_inheritHeld.Count == 0) return;
+            for (int i = 0; i < _inheritHeld.Count; i++)
+            {
+                var ps = _inheritHeld[i];
+                if (ps == null) continue; // destroyed with its item
+                try
+                {
+                    var inherit = ps.inheritVelocity;
+                    inherit.enabled = true;
+                }
+                catch (System.Exception e) { FailInherit(e); }
+            }
+            _inheritHeld.Clear();
+        }
+
+        private void FailInherit(System.Exception e)
+        {
+            if (_inheritFailed) return;
+            _inheritFailed = true;
+            Plugin.Log.LogWarning("[LocalBody] Smoke from an item in the hands can streak off when the view changes, for this session: " + e.Message);
+        }
+
+        /// <summary>
+        /// The game breathes pipe smoke out of one object on the view body, 1.08 m up and tipped 30 degrees up, which with
+        /// this body drawn is inside the brow. While the body is seen from the game's camera the breath leaves the drawn
+        /// lips instead, tipped up the same way from the face's heading. In first person it keeps the game's own place. The
+        /// object is a child of the view body, so it rides any move of that before the next particle update.
+        /// </summary>
+        private void PlaceExhale(bool drawn)
+        {
+            if (_exhaleFailed) return;
+            try
+            {
+                var effect = PipeExhaleEffect.instance;
+                Transform t = effect != null ? effect.transform : null;
+                if ((object)t != (object)_exhale)
+                {
+                    RestoreExhale();
+                    _exhale = t;
+                    if (t != null) { _exhaleLocalPos = t.localPosition; _exhaleLocalRot = t.localRotation; }
+                }
+                Vector3 mouth, facing;
+                if (!drawn || _exhale == null || _body == null || !_body.TryGetMouth(out mouth, out facing))
+                {
+                    RestoreExhale();
+                    return;
+                }
+                Vector3 heading = facing;
+                heading.y = 0f;
+                if (heading.sqrMagnitude < 1e-4f) heading = _root != null ? _root.transform.forward : Vector3.forward;
+                _exhale.SetPositionAndRotation(mouth + facing * 0.02f, Quaternion.LookRotation(heading.normalized, Vector3.up) * _exhaleLocalRot);
+                _exhaleMoved = true;
+            }
+            catch (System.Exception e)
+            {
+                _exhaleFailed = true;
+                RestoreExhale();
+                Plugin.Log.LogWarning("[LocalBody] The pipe exhale is left where the game has it for this session: " + e.Message);
+            }
+        }
+
+        private void RestoreExhale()
+        {
+            if (!_exhaleMoved) return;
+            _exhaleMoved = false;
+            try
+            {
+                if (_exhale == null) return;
+                _exhale.localPosition = _exhaleLocalPos;
+                _exhale.localRotation = _exhaleLocalRot;
+            }
+            catch { }
         }
 
         private void TryBuild()
@@ -405,6 +787,11 @@ namespace SailwindPlayerModel
 
         private void Teardown()
         {
+            _renderHeld = null;
+            ReleaseRenderSkins();
+            ReleaseEmitters();
+            RestoreInherit();
+            RestoreExhale();
             if (_body != null) _body.Destroy();
             _body = null;
             if (_root != null) Destroy(_root);

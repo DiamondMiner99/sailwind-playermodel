@@ -12,7 +12,8 @@ namespace SailwindPlayerModel
         /// holder's eyes, so usually out of reach: reads as pointing).</summary>
         HandReachesItem,
         /// <summary>The item is drawn in the right hand and the arm aims it the way the holder is aiming it.
-        /// Cosmetic on the viewer only.</summary>
+        /// Cosmetic on the viewer only, except that with Interactions enabled the local player's barrel goes back
+        /// to the two-handed carry after drinking from it.</summary>
         ItemInHand,
     }
 
@@ -32,7 +33,7 @@ namespace SailwindPlayerModel
         public static void Bind(ConfigFile cfg)
         {
             Mode = cfg.Bind(Section, "Mode", HeldPoseMode.ItemInHand,
-                "How a body shows what it holds. ItemInHand: the item is drawn in the hands, held the way that item is held (see 6. Item Poses). HandReachesItem: the item stays where the game floats it and the hands reach for it. Off: no arm pose.");
+                "How a body shows what it holds. ItemInHand: the item is drawn in the hands, held the way that item is held (see 6. Item Poses). HandReachesItem: the item stays where the game floats it and the hands reach for it. Off: no arm pose. With ItemInHand and 5. Interactions Enabled on, a barrel you drink from goes back to the two-handed carry when you stop drinking, in first person too, and like a barrel you have just picked up it cannot go into a crate or onto a shelf. Otherwise the game handles that barrel its own way.");
             ElbowDown = cfg.Bind(Section, "ElbowDown", 1.0f,
                 new ConfigDescription("Elbow direction: how strongly the elbow points down.",
                     new AcceptableValueRange<float>(-1f, 2f)));
@@ -80,6 +81,11 @@ namespace SailwindPlayerModel
         public float Length { get { return Ready ? _upperLen + _foreLen : 0f; } }
         /// <summary>Where the palm center is right now, in world space.</summary>
         public Vector3 PalmPosition { get { return _hand != null ? _hand.TransformPoint(_palmLocal) : Vector3.zero; } }
+        /// <summary>
+        /// How far past the wrist the palm target sits, in world units. SolveBones clamps the bone chain at the
+        /// wrist, so a grip is really reachable out to <see cref="Length"/> plus this and no farther. 0 before capture.
+        /// </summary>
+        public float PalmReach { get { return Ready && _hand != null ? Vector3.Scale(_palmLocal, _hand.lossyScale).magnitude : 0f; } }
 
         /// <summary>
         /// Capture bone lengths and aim axes. The aim axes are the child's direction in the bone's own frame,

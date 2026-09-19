@@ -28,7 +28,7 @@ namespace SailwindPlayerModel
         Rod,           // fishing rod: held like a pole to cast, swung from the hands, a hand on the reel with a line out
     }
 
-    /// <summary>Live tuning for carried items. Every value applies immediately from the F1 menu.</summary>
+    /// <summary>Live tuning for carried items. Every value but FoodTwoHandsMinLength applies immediately from the F1 menu.</summary>
     public static class ItemPoseTuning
     {
         private const string Section = "6. Item Poses";
@@ -60,18 +60,72 @@ namespace SailwindPlayerModel
                 "Distance of a scroll, map or compass being read, in meters in front of the chest.", new AcceptableValueRange<float>(0.15f, 0.7f)));
             ReadTilt = cfg.Bind(Section, "ReadTilt", 24f, new ConfigDescription(
                 "How far a map, scroll or compass is tipped toward the face, in degrees.", new AcceptableValueRange<float>(-30f, 80f)));
-            MouthForward = cfg.Bind(Section, "MouthForward", 0.11f, new ConfigDescription(
-                "Where drinks, food and pipes are brought to: meters in front of the head bone.", new AcceptableValueRange<float>(0f, 0.3f)));
-            MouthUp = cfg.Bind(Section, "MouthUp", 0.02f, new ConfigDescription(
-                "Where drinks, food and pipes are brought to: meters above the head bone.", new AcceptableValueRange<float>(-0.2f, 0.2f)));
+            MouthForward = cfg.Bind(Section, "MouthForward", 0.13f, new ConfigDescription(
+                "Where drinks, food and pipes are brought to: meters in front of the head bone, measured along the face.", new AcceptableValueRange<float>(0f, 0.3f)));
+            MouthUp = cfg.Bind(Section, "MouthUp", 0f, new ConfigDescription(
+                "Where drinks, food and pipes are brought to: meters above the head bone, measured along the face.", new AcceptableValueRange<float>(-0.2f, 0.2f)));
+            if (!MouthOffsetsAlreadyMoved(cfg))
+            {
+                MoveOldDefault(MouthForward, 0.11f);
+                MoveOldDefault(MouthUp, 0.02f);
+            }
             BigCarryGap = cfg.Bind(Section, "BigCarryGap", 0.10f, new ConfigDescription(
                 "Space between the chest and a crate or barrel being carried, in meters.", new AcceptableValueRange<float>(0f, 0.5f)));
             LanternDrop = cfg.Bind(Section, "LanternDrop", -0.30f, new ConfigDescription(
                 "Height of the hand holding a lantern, in meters above the chest.", new AcceptableValueRange<float>(-0.7f, 0.2f)));
             FoodTwoHandsMinLength = cfg.Bind(Section, "FoodTwoHandsMinLength", 0.28f, new ConfigDescription(
-                "Food at least this long (meters) is held and eaten with both hands: loaves, whole fish, big cheese.", new AcceptableValueRange<float>(0.1f, 1f)));
+                "Food at least this long (meters) is held and eaten with both hands: loaves, whole fish, big cheese. Each piece of food keeps the hold it got the first time it was held, so a change applies to food not held yet.", new AcceptableValueRange<float>(0.1f, 1f)));
             MaxWristBend = cfg.Bind(Section, "MaxWristBend", 60f, new ConfigDescription(
                 "Most the wrist bends away from the forearm to match a grip, in degrees.", new AcceptableValueRange<float>(10f, 90f)));
+        }
+
+        /// <summary>
+        /// The mouth offsets used to be measured along the body's heading and world up, with defaults of 0.11 and 0.02,
+        /// which put the mouth on the upper lip and inside the face. They are measured along the face now, with new
+        /// defaults. BepInEx keeps whatever value a config file already holds, so a value still at its old default is
+        /// moved to the new one here. That happens once, on the first launch of this release: the marker
+        /// MouthOffsetsAlreadyMoved reads and writes is what says it has been done.
+        /// </summary>
+        private static void MoveOldDefault(ConfigEntry<float> entry, float oldDefault)
+        {
+            try
+            {
+                if (Mathf.Abs(entry.Value - oldDefault) > 1e-4f) return;
+                float now = (float)entry.DefaultValue;
+                entry.Value = now;
+                Plugin.Log.LogInfo($"[ItemPose] {entry.Definition.Key} was at the old default {oldDefault:F2}, set to the new default {now:F2}");
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning($"[ItemPose] Could not move {entry.Definition.Key} off its old default: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Whether the move above has already been done, recorded in a marker entry the F1 menu does not show.
+        /// A config file written before this release has no marker, so it still moves off the old defaults on its
+        /// first launch; after that a player who sets 0.11 or 0.02 back on purpose keeps it. The marker is written
+        /// before the move rather than after, so a move that throws cannot leave this running on every launch.
+        /// False when the marker cannot be bound at all, which leaves the move behaving as it did before.
+        /// </summary>
+        private static bool MouthOffsetsAlreadyMoved(ConfigFile cfg)
+        {
+            try
+            {
+                // BrowsableAttribute is what ConfigurationManager reads to keep an entry out of its list, and
+                // BepInEx ignores tags it does not know, so nothing here needs ConfigurationManager installed.
+                var marker = cfg.Bind(Section, "MouthOffsetsMoved", false, new ConfigDescription(
+                    "Bookkeeping, not a setting: records that the mouth offsets have been moved off their old defaults.",
+                    null, new System.ComponentModel.BrowsableAttribute(false)));
+                if (marker.Value) return true;
+                marker.Value = true;
+                return false;
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("[ItemPose] Could not read the mouth-offset marker: " + e.Message);
+                return false;
+            }
         }
     }
 
@@ -249,10 +303,6 @@ namespace SailwindPlayerModel
                 p.ReachFrame = p.Root.Find("rod rotator/fishing");
                 p.RodTip = p.Root.Find("rod rotator/fishing/fishing_line_att");
                 p.RodSpinner = p.Root.Find("rod rotator/fishing/fishing_rod_spinner");
-                // The rod is a skinned mesh, and skinned meshes take their bones' places before the moment a held item is
-                // moved into the hands for drawing; without this the hands closed on a rod that was still drawn where the
-                // game floats it.
-                foreach (var smr in p.Root.GetComponentsInChildren<SkinnedMeshRenderer>(true)) smr.forceMatrixRecalculationPerRender = true;
                 return p.ReachFrame != null ? HoldStyle.Rod : HoldStyle.Reach;
             }
             if (it is ShipItemChipLog) { p.ChipLog = true; return HoldStyle.Reach; }
@@ -497,8 +547,12 @@ namespace SailwindPlayerModel
                     Spin(ref pos, ref rot, hand, R, restSpin);
                     if (use > 0.001f)
                     {
-                        Vector3 pu = f.Mouth - rot * Vector3.Scale(mouthpiece, s);
-                        pos = Vector3.Lerp(pos, pu, use);
+                        // The stem dips from the lips, pivoting on the mouthpiece, so the bowl hangs below the mouth. The
+                        // game's pipe never tips (its maxRot is 0), so the angle is the pose's own. The palm stays on the
+                        // bowl; the wrist limit keeps the hand from following the whole dip.
+                        Quaternion ru = f.Yaw * Quaternion.Euler(14f * use, 0f, 0f);
+                        Vector3 pu = f.Mouth - ru * Vector3.Scale(mouthpiece, s);
+                        pos = Vector3.Lerp(pos, pu, use); rot = Quaternion.Slerp(rot, ru, use);
                     }
                     Place(ref r, pos, rot);
                     r.R = Grip(pos, rot, s, bowl, new Vector3(0f, 1f, 0f), new Vector3(0f, 0f, 1f));
@@ -1033,31 +1087,40 @@ namespace SailwindPlayerModel
     }
 
     /// <summary>
-    /// A barrel goes back to being carried once you stop drinking from it. ShipItemBottle.OnAltHeld clears `big`
-    /// so the barrel can be tipped at the mouth like a bottle, and only OnDrop sets it again, so until it was put
-    /// down the game held the barrel upright in front of the face while the body still carried it.
+    /// While item poses are on, a barrel goes back to being carried once you stop drinking from it. ShipItemBottle.OnAltHeld
+    /// clears `big` so the barrel can be tipped at the mouth like a bottle, and only OnDrop sets it again, so until it was put
+    /// down the game held the barrel upright in front of the face while the body still carried it. With item poses off the
+    /// game's own handling stands.
     /// </summary>
     [HarmonyPatch(typeof(ShipItemBottle))]
     internal static class BarrelCarryPatches
     {
-        private static readonly HashSet<int> _drinking = new HashSet<int>();
+        // The one barrel the local player is drinking from. Only the held item receives OnAltHeld.
+        private static ShipItemBottle _drinking;
+
+        private static bool PoseInUse()
+        {
+            return InteractionTuning.Enabled != null && InteractionTuning.Enabled.Value
+                && HeldToolPose.Mode != null && HeldToolPose.Mode.Value == HeldPoseMode.ItemInHand;
+        }
 
         [HarmonyPrefix]
         [HarmonyPatch("OnAltHeld", new System.Type[0])]
         private static void BeforeDrink(ShipItemBottle __instance)
         {
-            if (__instance.big && __instance.GetCapacity() > 10f) _drinking.Add(__instance.GetInstanceID());
+            if (__instance.big && __instance.GetCapacity() > 10f && PoseInUse()) _drinking = __instance;
         }
 
         [HarmonyPostfix]
         [HarmonyPatch("ExtraLateUpdate")]
         private static void AfterLateUpdate(ShipItemBottle __instance)
         {
-            int id = __instance.GetInstanceID();
-            if (!_drinking.Contains(id) || __instance.IsDrinking()) return;
-            _drinking.Remove(id);
-            // Still in hand: carry it again. Dropped: OnDrop has already set it.
-            if (__instance.held != null) __instance.big = true;
+            // Runs for every bottle every frame: one reference compare for all but the barrel being drunk from.
+            if (!ReferenceEquals(__instance, _drinking) || __instance.IsDrinking()) return;
+            _drinking = null;
+            // Still in hand: carry it again. Dropped: OnDrop has already set it. Checked again in case poses were
+            // switched off mid-drink.
+            if (__instance.held != null && PoseInUse()) __instance.big = true;
         }
     }
 }

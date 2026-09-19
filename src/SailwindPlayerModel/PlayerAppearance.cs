@@ -28,12 +28,14 @@ namespace SailwindPlayerModel
     /// THEREFORE: Apply() MUST be called while the clone is still inactive. Calling it afterwards does
     /// nothing visible until something else re-runs UpdateModel.
     ///
-    /// SAFETY. Indices arriving from the network are never trusted to index anything. They are clamped at
-    /// apply time against the LIVE child count of the group on THIS machine, which is the only count that
-    /// can actually be indexed here - deliberately not against a compiled-in table, because the body
-    /// template is cloned from whichever shopkeeper loaded and a hardcoded count could drift past it. An
-    /// unknown or out-of-range value degrades to that group's variant 0, so the worst case is a plain
-    /// sailor rather than an invisible or T-posing one.
+    /// SAFETY. Indices arriving from the network are never trusted to index anything. They are wrapped at
+    /// apply time into the LIVE count of wearable parts in the group on THIS machine (NormalizeValue), and
+    /// every index is then clamped to its list (SanitizeIndices), which is the only count that can actually
+    /// be indexed here - deliberately not against a compiled-in table, because the body template is cloned
+    /// from whichever NPC loaded and a hardcoded count could drift past it. An out-of-range value wraps
+    /// around the group's variants, 0 is "wear nothing" only on the slots that allow it and wraps to the
+    /// last variant elsewhere, and an unknown slot name is ignored, so the worst case is an unexpected look
+    /// rather than an invisible or T-posing one.
     /// </summary>
     public struct PlayerAppearance
     {

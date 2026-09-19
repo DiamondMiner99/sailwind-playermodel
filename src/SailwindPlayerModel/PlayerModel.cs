@@ -67,7 +67,7 @@ namespace SailwindPlayerModel
             var b = Body;
             if (b == null)
             {
-                Plugin.Log.LogInfo($"[PoseClaim] '{owner}' asked to claim {parts} but there is no body yet");
+                Plugin.Log?.LogInfo($"[PoseClaim] '{owner}' asked to claim {parts} but there is no body yet");
                 return null;
             }
             return b.ClaimPose(owner, priority, parts, write);
@@ -190,7 +190,10 @@ namespace SailwindPlayerModel
 
         /// <summary>
         /// What the local player looks like. Read from config on first use and written back on set, so it
-        /// survives restarts. The co-op mod writes this from its character screen and puts it on the wire.
+        /// survives restarts. The Character screen writes this, and co-op sends it to the crew.
+        ///
+        /// Until this mod's Awake binds the setting, a read returns the default look without keeping it, and a
+        /// value set is kept for the session but not saved.
         /// </summary>
         public static PlayerAppearance LocalAppearance
         {
@@ -198,7 +201,10 @@ namespace SailwindPlayerModel
             {
                 if (!_localAppearanceLoaded)
                 {
-                    string raw = BodyTuning.Appearance != null ? BodyTuning.Appearance.Value : null;
+                    // Unbound before our Awake, or for the whole session when this mod stood down. Latching here
+                    // would hide the saved look from every later read, so answer without latching.
+                    if (BodyTuning.Appearance == null) return PlayerAppearance.Default();
+                    string raw = BodyTuning.Appearance.Value;
                     if (!string.IsNullOrEmpty(raw))
                     {
                         _localAppearance = PlayerAppearance.Deserialize(raw);
@@ -211,7 +217,7 @@ namespace SailwindPlayerModel
                         if (provider != null)
                         {
                             try { seeded = provider(); }
-                            catch (Exception e) { Plugin.Log.LogWarning("[PlayerModel] Default appearance provider threw: " + e); }
+                            catch (Exception e) { Plugin.Log?.LogWarning("[PlayerModel] Default appearance provider threw: " + e); }
                         }
                         if (seeded.HasValue)
                         {
@@ -231,13 +237,25 @@ namespace SailwindPlayerModel
             {
                 _localAppearance = value;
                 _localAppearanceLoaded = true;
-                BodyTuning.Appearance.Value = value.Serialize();
-                ApplyAppearanceLive();
+                // Setting the config value saves the file. A locked or read-only file throws, and that must not
+                // stop the body from being re-dressed or the crew from being told. BepInEx keeps the new value
+                // in memory, so the next successful save still writes it. The setting is unbound when this mod
+                // stood down or another mod calls this before our Awake; the value is then kept for the session
+                // (latched above, so the saved string is not read over it) but not saved. Plugin.Log can still be
+                // null that early.
+                try
+                {
+                    if (BodyTuning.Appearance != null) BodyTuning.Appearance.Value = value.Serialize();
+                    else Plugin.Log?.LogWarning("[PlayerModel] Your character was set before this mod's settings were loaded, so it is used this session but not saved");
+                }
+                catch (Exception e) { Plugin.Log?.LogWarning("[PlayerModel] Could not save your character to the config file: " + e.Message); }
+                try { ApplyAppearanceLive(); }
+                catch (Exception e) { Plugin.Log?.LogWarning("[PlayerModel] Could not re-dress the body: " + e); }
                 var handler = LocalAppearanceChanged;
                 if (handler != null)
                 {
                     try { handler(); }
-                    catch (Exception e) { Plugin.Log.LogWarning("[PlayerModel] An appearance listener threw: " + e); }
+                    catch (Exception e) { Plugin.Log?.LogWarning("[PlayerModel] An appearance listener threw: " + e); }
                 }
             }
         }

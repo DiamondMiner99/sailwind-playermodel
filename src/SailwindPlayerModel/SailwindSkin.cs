@@ -96,5 +96,56 @@ namespace SailwindPlayerModel
             if (f != null && s != null) s.font = f;
             return s;
         }
+
+        private static bool _uiScaleFailed;
+
+        /// <summary>
+        /// How many times its 1080p size a screen-space panel should be drawn: the screen height over 1080,
+        /// never less than 1, times the UIScale setting.
+        ///
+        /// WHY PANELS NEED THIS AND THE GAME DOES NOT. Sailwind has no screen-space UI. Its menus and hints
+        /// are world-space TextMesh in front of the camera, so their pixel size already follows the screen
+        /// height. IMGUI is laid out in raw pixels, and Sailwind.exe is per-monitor DPI aware, so Windows
+        /// never enlarges it either: without this a panel sized for 1080p covers half as much of a 4K screen.
+        ///
+        /// The floor of 1 keeps shorter screens (720p, a Steam Deck) at the 1080p size, where the text is
+        /// still readable, instead of shrinking with them. Callers scale font sizes and layout numbers by
+        /// this, never GUI.matrix: a matrix stretches glyphs rasterized at the small size, and one left set
+        /// by a throw could move another mod's panel away from where it tests its clicks.
+        ///
+        /// Returns 1, the 1080p size, if anything about it fails, and stops trying after the first failure.
+        /// </summary>
+        public static float UiScale
+        {
+            get
+            {
+                if (_uiScaleFailed) return 1f;
+                try
+                {
+                    float auto = Mathf.Max(1f, Screen.height / 1080f);
+                    float user = 1f;
+                    var entry = BodyTuning.UIScale;
+                    if (entry != null)
+                    {
+                        user = entry.Value;
+                        user = float.IsNaN(user) || float.IsInfinity(user) ? 1f : Mathf.Clamp(user, 0.5f, 2.5f);
+                    }
+                    float s = auto * user;
+                    return float.IsNaN(s) || float.IsInfinity(s) || s <= 0f ? 1f : s;
+                }
+                catch (System.Exception e)
+                {
+                    _uiScaleFailed = true;
+                    Plugin.Log.LogWarning("[UI] Could not work out the panel scale, keeping the 1080p size: " + e.Message);
+                    return 1f;
+                }
+            }
+        }
+
+        /// <summary>A size given in 1080p pixels, at scale s, rounded to whole pixels.</summary>
+        public static int Px(float referencePx, float s)
+        {
+            return Mathf.RoundToInt(referencePx * s);
+        }
     }
 }

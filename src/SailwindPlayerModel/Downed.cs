@@ -27,7 +27,7 @@ namespace SailwindPlayerModel
             Enabled = cfg.Bind(Section, "Enabled", false,
                 "Unfinished, off by default. Getting knocked off your feet as a ragdoll: falls from the rigging, and being shoved once crewmates can shove. A boat that brushes the fallen body still throws it, which is why this waits.");
             RagdollLongFalls = cfg.Bind(Section, "RagdollLongFalls", true,
-                "Go limp and fall as a ragdoll when a fall will take more than a second coming down and ends at least 2 meters below where you left the ground (off the rigging, down a hatch, over the side), or when a flying leap lands hard on a deck at least a meter lower. Ordinary jumps never do.");
+                "Go limp and fall as a ragdoll when a fall will take more than a second coming down and ends at least 2 meters below where you left the ground (off the rigging, down a hatch, over the side), or when a flying leap lands hard on a deck at least 1.5 meters lower. Ordinary jumps never do.");
             TestKey = cfg.Bind(Section, "TestKey", KeyboardShortcut.Empty,
                 "Testing only, leave unbound for normal play. Press to get knocked over, pushed from a random direction.");
         }
@@ -310,6 +310,11 @@ namespace SailwindPlayerModel
             if (GameState.inBed || GameState.sleeping || GameState.recovering) return "in bed or asleep";
             if (GameState.currentShipyard != null) return "in the shipyard";
             if (PlayerSwimming.swimming) return "swimming";
+            // A chart, a market or a blackout that took the controls during a seat keeps them after standing up. A control
+            // held from the seat (a tiller, another mod's oars) is counted there too, but Begin stands the player up and lets
+            // go of it, the same as for a standing player.
+            if (Seating.ControlsHeldElsewhere && LocalInteraction.StickyControl(LocalInteraction.Pointer) == null)
+                return "something else has the controls";
             // Sitting, and steering or cranking, both take the controls in the game's own way and are let go of first.
             if (!Refs.charController.enabled && !Seating.IsSeated && LocalInteraction.StickyControl(LocalInteraction.Pointer) == null)
                 return "something else has the controls";

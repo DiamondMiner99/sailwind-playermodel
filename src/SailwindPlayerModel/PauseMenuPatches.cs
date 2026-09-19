@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using HarmonyLib;
 using UnityEngine;
 
@@ -13,12 +14,17 @@ namespace SailwindPlayerModel
         /// <summary>The live StartMenu, captured at Start. Other mods need it to drive vanilla menu flows.</summary>
         public static StartMenu ActiveStartMenu { get; private set; }
 
+        // Set when GameToSettings pauses, cleared by SettingsToGame. Owned here rather than read from
+        // GameState.inCursorMenu or wasInSettingsMenu, which other mods and an end-of-frame coroutine write.
+        static bool _pausedByMenu;
+
         // Built once at boot; the panel exists by Start.
         [HarmonyPatch(typeof(StartMenu), "Start")]
         public static class StartMenuStartPatch
         {
             static void Postfix(StartMenu __instance)
             {
+                _pausedByMenu = false; // a fresh scene starts unpaused
                 ActiveStartMenu = __instance;
                 ModPauseMenu.Install(__instance);
             }
@@ -29,6 +35,30 @@ namespace SailwindPlayerModel
         [HarmonyPatch(typeof(StartMenu), "GameToSettings")]
         public static class GameToSettingsPatch
         {
+            static bool Prefix(StartMenu __instance)
+            {
+                if (_pausedByMenu && Time.timeScale <= 0f)
+                {
+                    // Already paused with time stopped. Running GameToSettings again stores timeScale 0 as the
+                    // value Resume restores, which freezes the game for good. Harmony still runs the postfix,
+                    // which shows the parchment again. Another mod can lock the cursor while the game is
+                    // paused (Three Sheets does when the F1 window closes), so free it the way the pause does.
+                    if (!GameState.inCursorMenu) MouseLook.ToggleMouseLookAndCursor(false);
+                    // Mouse look was live while the cursor was locked, so the view may have turned away from
+                    // where the first pause placed the menu, and LatePin does not re-aim at timeScale 0. Aim
+                    // it the way GameToSettings does. MoveMenuToPlayer only moves the menu's transform.
+                    try { Traverse.Create(__instance).Method("MoveMenuToPlayer").GetValue(); }
+                    catch (Exception e)
+                    {
+                        Plugin.Log.LogWarning("[PauseMenu] Could not move the menu in front of the view: " + e.GetBaseException().Message);
+                    }
+                    Plugin.Log.LogWarning("[PauseMenu] Pause requested while already paused, showing the menu again instead");
+                    return false;
+                }
+                _pausedByMenu = true;
+                return true;
+            }
+
             static void Postfix(StartMenu __instance)
             {
                 ModPauseMenu.OnPauseOpened(__instance);
@@ -42,9 +72,35 @@ namespace SailwindPlayerModel
         {
             static void Postfix()
             {
+                _pausedByMenu = false;
                 ModPauseMenu.Hide();
                 ModPauseMenu.SubPageFromPause = false;
             }
+        }
+
+        // In game, SettingsToGame calls DisableStartMenu, which starts FadeStartMenu(-1) on the title scroll even
+        // though it is already hidden. That coroutine holds animsPlaying at 1 across a scaled 0.2 s wait, and
+        // StartMenu.ButtonClick ignores every click while it is held, so pausing again inside that window left
+        // Quit and Recover dead for the whole pause. Skip the fade only when there is nothing to move.
+        // DisableStartMenu still sets the logo scale and position.
+        //
+        // No [HarmonyPatch] attribute: FadeStartMenu is a private coroutine, so this is registered on its own
+        // through GuardedPatches, and a renamed method skips only this patch.
+        internal static class InGameTitleFadePatch
+        {
+            static bool Prefix(StartMenu __instance, int __0, ref IEnumerator __result)
+            {
+                if (!GameState.playing || __0 != -1) return true;
+                GameObject ui = null;
+                // Traverse rather than an injected ___startUI, so a renamed field falls back to vanilla
+                // instead of failing the patch.
+                try { ui = Traverse.Create(__instance).Field("startUI").GetValue<GameObject>(); } catch { }
+                if (ui == null || ui.activeSelf) return true; // fail open to vanilla
+                __result = Nothing();
+                return false;
+            }
+
+            static IEnumerator Nothing() { yield break; }
         }
 
         // While our panel (or a sub-page opened from it) is up, route Escape to Resume or back-to-pause
@@ -67,6 +123,8 @@ namespace SailwindPlayerModel
                 // Without this, vanilla sees no active panel (ours hidden by the screen's Open, its own
                 // settingsUI disabled by OnPauseOpened) and re-enters GameToSettings while ALREADY paused,
                 // latching unpausedTimescale = 0, which is a permanent freeze on the next resume.
+                // GameToSettingsPatch's prefix now refuses a second pause while time is stopped, as the
+                // backstop for any blank paused screen; these claims still keep the key away from vanilla.
                 if (CharacterScreen.IsOpen || CharacterScreen.ConsumedPauseKeyThisFrame) return false;
                 if (PauseKeyClaimed()) return false;
 
@@ -125,7 +183,10 @@ namespace SailwindPlayerModel
             static bool Prefix(StartMenuButton __instance)
             {
                 for (var t = __instance.transform; t != null; t = t.parent)
+                {
+                    if (t.name == ModPauseMenu.TemplateName) return false; // never run vanilla New Game from the kept template
                     if (ModPauseMenu.HandleClick(t.name)) return false;
+                }
                 return true; // not ours, run the vanilla action
             }
         }

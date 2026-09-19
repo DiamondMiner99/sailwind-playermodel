@@ -83,6 +83,9 @@ namespace SailwindPlayerModel
         static readonly List<Entry> _entries = new List<Entry>();
         static bool _builtIns;
 
+        /// <summary>Name of the inactive button row kept on the panel to build later buttons from.</summary>
+        internal const string TemplateName = "modpause_button_template";
+
         /// <summary>One button on the menu. Label and Visible are polled every refresh, so a button can
         /// change its text or vanish as state changes without anyone re-registering it.</summary>
         public sealed class Entry
@@ -145,10 +148,18 @@ namespace SailwindPlayerModel
         {
             if (entry == null || string.IsNullOrEmpty(entry.Id)) return;
             RegisterBuiltIns(); // so a mod registering from its Awake sorts against the built-ins from the start
+            AddEntry(entry);
+        }
+
+        // The registry write itself. RegisterBuiltIns calls this rather than Register, which would recurse
+        // back into RegisterBuiltIns. Logging tolerates a null Plugin.Log, because another mod can reach this
+        // from its own Awake before this plugin's Awake has run.
+        static void AddEntry(Entry entry)
+        {
             _entries.RemoveAll(e => e.Id == entry.Id);
             _entries.Add(entry);
             _entries.Sort((a, b) => a.Order.CompareTo(b.Order));
-            Plugin.Log.LogInfo($"[PauseMenu] Registered button '{entry.Id}' at order {entry.Order} ({_entries.Count} total)");
+            Plugin.Log?.LogInfo($"[PauseMenu] Registered button '{entry.Id}' at order {entry.Order} ({_entries.Count} total)");
             // A panel that already exists needs the new button built into it now, not at the next install.
             if (_panel != null && _buttonTemplate != null)
             {
@@ -162,8 +173,16 @@ namespace SailwindPlayerModel
             int removed = _entries.RemoveAll(e => e.Id == id);
             if (removed == 0) return;
             var t = _panel != null ? MenuUtil.FindChild(_panel.transform, id) : null;
-            if (t != null) UnityEngine.Object.Destroy(t.gameObject);
-            Plugin.Log.LogInfo($"[PauseMenu] Unregistered button '{id}'");
+            if (t != null)
+            {
+                // Destroy is deferred to the end of the frame. Rename and hide the button first, so a Register
+                // of the same id in this frame builds a fresh one instead of finding this one.
+                t.name = id + "_removed";
+                t.gameObject.SetActive(false);
+                UnityEngine.Object.Destroy(t.gameObject);
+            }
+            Plugin.Log?.LogInfo($"[PauseMenu] Unregistered button '{id}'");
+            if (IsOpen) LayoutButtons();
         }
 
         /// <summary>
@@ -178,10 +197,10 @@ namespace SailwindPlayerModel
             {
                 if (_entries[i].Id != id) continue;
                 _entries[i].Visible = visible;
-                Plugin.Log.LogInfo($"[PauseMenu] Visibility rule set on '{id}'");
+                Plugin.Log?.LogInfo($"[PauseMenu] Visibility rule set on '{id}'");
                 return;
             }
-            Plugin.Log.LogWarning($"[PauseMenu] SetVisible: no button '{id}'");
+            Plugin.Log?.LogWarning($"[PauseMenu] SetVisible: no button '{id}'");
         }
 
         static void RegisterBuiltIns()
@@ -189,7 +208,7 @@ namespace SailwindPlayerModel
             if (_builtIns) return;
             _builtIns = true;
 
-            Register(new Entry
+            AddEntry(new Entry
             {
                 Id = Resume,
                 Order = Order.Resume,
@@ -197,7 +216,7 @@ namespace SailwindPlayerModel
                 OnClick = () => InvokeStartMenu("SettingsToGame"), // unpause; its postfix hides our panel
             });
 
-            Register(new Entry
+            AddEntry(new Entry
             {
                 Id = Character,
                 Order = Order.Character,
@@ -211,7 +230,7 @@ namespace SailwindPlayerModel
                 OnClick = () => CharacterScreen.Open(),
             });
 
-            Register(new Entry
+            AddEntry(new Entry
             {
                 Id = Settings,
                 Order = Order.Settings,
@@ -225,7 +244,7 @@ namespace SailwindPlayerModel
                 },
             });
 
-            Register(new Entry
+            AddEntry(new Entry
             {
                 Id = Recover,
                 Order = Order.Recover,
@@ -238,16 +257,27 @@ namespace SailwindPlayerModel
                 },
             });
 
-            Register(new Entry
+            AddEntry(new Entry
             {
                 Id = Quit,
                 Order = Order.Quit,
                 Label = () => "Quit Game",
                 OnClick = () =>
                 {
-                    Hide();
                     SubPageFromPause = true; // so cancelling the confirm returns to our panel
-                    InvokeButtonClick(StartMenuButtonType.QuitMenu);
+                    // Open the dialog directly, as Settings and Recover do. ButtonClick(QuitMenu) ignores the
+                    // click while vanilla's animsPlaying counter is held (the press-F prompt after a load holds
+                    // it), and hiding the panel first left nothing on screen. The dialog's own Quit still goes
+                    // through ButtonClick, so the save on quit and any mod hooked on it run as before.
+                    try { InvokeStartMenu("EnableQuitConfirmMenu"); }
+                    catch (Exception e) { Plugin.Log.LogWarning("[PauseMenu] Could not open the quit confirmation: " + e.Message); }
+                    if (SubPanelActive("confirmQuitUI")) Hide();
+                    else
+                    {
+                        // Keep the parchment up rather than leave a blank paused screen.
+                        SubPageFromPause = false;
+                        Plugin.Log.LogWarning("[PauseMenu] The quit confirmation did not open");
+                    }
                 },
             });
         }
@@ -282,9 +312,8 @@ namespace SailwindPlayerModel
                     // buttons would fire real actions. Destroy and null it so OnPauseOpened can retry rather
                     // than caching a broken panel.
                     Plugin.Log.LogWarning("[PauseMenu] template button not found");
-                    UnityEngine.Object.Destroy(_panel); _panel = null; return;
+                    UnityEngine.Object.Destroy(_panel); _panel = null; _buttonTemplate = null; return;
                 }
-                _buttonTemplate = template;
 
                 // Record the vanilla buttons (by their StartMenuButton component's parent) BEFORE adding
                 // ours. Robust to however they are nested under the scroll; name-based stripping missed
@@ -295,6 +324,14 @@ namespace SailwindPlayerModel
                     var btn = (smb.transform.parent != null) ? smb.transform.parent.gameObject : smb.gameObject;
                     if (!vanilla.Contains(btn)) vanilla.Add(btn);
                 }
+
+                // A private copy to build buttons from later. The row found above is one of the title buttons
+                // removed below, so it cannot serve as the template once this frame ends. The copy stays
+                // inactive, and the click prefix refuses to run its vanilla New Game.
+                var keep = UnityEngine.Object.Instantiate(template.gameObject, _panel.transform);
+                keep.name = TemplateName;
+                keep.SetActive(false);
+                _buttonTemplate = keep.transform;
 
                 EnsureButtons();
 
@@ -318,6 +355,7 @@ namespace SailwindPlayerModel
                 // A half-built panel (vanilla buttons not yet stripped) must never go live; drop it so the
                 // next open retries from scratch.
                 if (_panel != null) { UnityEngine.Object.Destroy(_panel); _panel = null; }
+                _buttonTemplate = null;
             }
         }
 
@@ -325,8 +363,27 @@ namespace SailwindPlayerModel
         {
             if (_panel == null || _buttonTemplate == null) return;
             for (int i = 0; i < _entries.Count; i++)
-                MenuUtil.EnsureButton(_panel.transform, _buttonTemplate, _entries[i].Id,
+            {
+                var e = _entries[i];
+                if (MenuUtil.FindChild(_panel.transform, e.Id) != null) continue;
+                MenuUtil.EnsureButton(_panel.transform, _buttonTemplate, e.Id,
                     new Vector3(ColX, ColTopY - ColStep * i, ColZ));
+                // The template is inactive, so the clone is too. Start it in the state Refresh would choose,
+                // so a hidden entry never shows or takes a place in the column.
+                var made = MenuUtil.FindChild(_panel.transform, e.Id);
+                if (made != null) made.gameObject.SetActive(SafeVisible(e));
+            }
+        }
+
+        static bool SafeVisible(Entry e)
+        {
+            if (e.Visible == null) return true;
+            try { return e.Visible(); }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogWarning($"[PauseMenu] '{e.Id}' Visible threw: {ex.Message}");
+                return true;
+            }
         }
 
         /// <summary>
@@ -376,6 +433,7 @@ namespace SailwindPlayerModel
                 _startMenu = startMenu;
                 if (_panel == null) Install(startMenu);
                 if (_panel == null) return;
+                EnsureButtons(); // anything registered since the last open that has no button yet
                 SubPageFromPause = false;
                 InvokeStartMenu("DisableSettingsMenu");
                 _panel.SetActive(true);
@@ -514,12 +572,7 @@ namespace SailwindPlayerModel
                 var t = MenuUtil.FindChild(_panel.transform, e.Id);
                 if (t == null) continue;
 
-                bool visible = true;
-                if (e.Visible != null)
-                {
-                    try { visible = e.Visible(); }
-                    catch (Exception ex) { Plugin.Log.LogWarning($"[PauseMenu] '{e.Id}' Visible threw: {ex.Message}"); }
-                }
+                bool visible = SafeVisible(e);
                 MenuUtil.SetActive(t, visible);
                 if (!visible) continue;
 
@@ -664,12 +717,6 @@ namespace SailwindPlayerModel
         {
             if (_startMenu == null) return;
             Traverse.Create(_startMenu).Method(method).GetValue();
-        }
-
-        static void InvokeButtonClick(StartMenuButtonType type)
-        {
-            if (_startMenu == null) return;
-            Traverse.Create(_startMenu).Method("ButtonClick", new object[] { type }).GetValue();
         }
 
         static bool SubPanelActive(string field)

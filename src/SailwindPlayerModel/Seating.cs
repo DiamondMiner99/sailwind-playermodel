@@ -23,9 +23,9 @@ namespace SailwindPlayerModel
         public static void Bind(ConfigFile cfg)
         {
             Enabled = cfg.Bind(Section, "Enabled", true,
-                "Sit on chairs (right-click a chair that is set down) and on ledges, rails, crates, benches and spars (the sit key). Any movement key or jump stands you up.");
+                "Sit on chairs (right-click a chair that is set down) and on ledges, rails, crates, benches and spars (the sit key). The seat has to be on the boat you are aboard, or ashore when you are ashore. Any movement key or jump stands you up. A ship's wheel, rope winch, anchor winch or bilge pump whose handles are within reach of where you sit is worked from the seat: the movement keys work it instead of standing you up, so click it to let go first. One of those out of reach stands you up to it, and so does one carried out of reach or round behind you while you work it. A Shipyard Expansion tiller and another mod's control, such as HMS Leopard's oars or the Realistic Skies telescope, are worked from the seat with no reach test, so sit within arm's reach of one or your hands will not be on it. A sail pusher always stands you up, and so does a wheel or winch held with the mouse (the game's steer with mouse and winches with mouse settings).");
             SitKey = cfg.Bind(Section, "SitKey", new KeyboardShortcut(KeyCode.X),
-                "Sit on whatever you are looking at, if it is at seat height, or on the floor. Pressed again while sitting on a ledge or rail, swings your legs over to the other side; on a spar such as the bowsprit, switches between straddling it and sitting with both legs on one side; on the floor, changes how you sit.");
+                "Sit on whatever you are looking at, if it is at seat height, or on the floor. Pressed again while sitting on a ledge or rail, swings your legs over to the other side; on a spar such as the bowsprit, switches between straddling it and sitting with both legs on one side; on the floor, changes how you sit. Does nothing while you hold a control, including one you work from the seat. It works while you hold other keys, such as the movement keys.");
             ShowSeatedLabel = cfg.Bind(Section, "ShowSeatedLabel", true,
                 "Show a dim (seated) label at the bottom of the screen while sitting in first person.");
             SettleSeconds = cfg.Bind(Section, "SettleSeconds", 0.45f,
@@ -57,14 +57,25 @@ namespace SailwindPlayerModel
 
     /// <summary>
     /// The local player sitting down: on a chair (right-click it, the way the game's beds work) or on anything at
-    /// seat height (the sit key). Held items and looking around keep working; any movement key or jump stands you
-    /// back up where you sat down from.
+    /// seat height (the sit key). Held items and looking around keep working, and a tiller or another mod's sticky
+    /// control (oars, a telescope) can be worked from the seat. Any movement key or jump stands you back up where you
+    /// sat down from, once such a control is let go of.
     ///
     /// BUILT ON THE GAME'S OWN BED. Sleep.EnterBed turns off the physics controller and the observer mirror,
     /// then pins the observer (the visual player the camera hangs off) to the bed every frame. The physics
     /// controller stays frozen where the player was standing, in the boat's own frame, so turning both back on
     /// returns the player to that spot however far the boat has sailed. Sitting does the same, except that it
     /// leaves mouse look and the pointer alone, so items can still be used.
+    ///
+    /// ONE HOLDER OF THE CONTROLS AMONG SEVERAL. Charts, markets, sticky controls, beds, sleep, recovery and other
+    /// mods turn the controls off and on around a seat. While sitting, their turn-offs are counted and their
+    /// hand-backs are kept by the seat (SeatKeepsControlsPatch), so closing a chart, letting go of a tiller or waking
+    /// up never stands the player up. A seat ends only for a reason: the seat is gone, the game took over (a bed,
+    /// recovery, the shipyard), the player left that boat, something moved the controller, the chair was picked up
+    /// or tipped over, the water, taking a control that is not worked from the seat, one worked from the seat being
+    /// carried out of reach or round behind the shoulder, a key, the hot seat, or a view guard. Standing up hands the controls back only when nothing else still holds them; otherwise that holder's
+    /// own hand-back does it, and if nothing in sight holds them for a while and nothing hands them back, they are
+    /// handed back anyway.
     ///
     /// TWO COPIES OF EVERY BOAT. The ship you see has almost no solid colliders: its items' own colliders
     /// (triggers) and a copy of the hull the game makes for cleaning (HullPlayerCollider, layer 12). The deck,
@@ -97,6 +108,7 @@ namespace SailwindPlayerModel
             public float SparWidth;
             public SeatPose Pose;
             public float FloorBelow;        // meters from the seat surface down to the floor the feet rest on
+            public Transform AboardBoat;    // GameState.currentBoat when the player sat
         }
 
         /// <summary>A raycast hit in the visible frame, whichever copy of the boat it was found on.</summary>
@@ -142,6 +154,46 @@ namespace SailwindPlayerModel
         private float _riseTime;
         private Vector3 _riseFrom;
         private bool _controlTaken;
+        private bool _holdingFromSeat;   // working a tiller, a stock control in reach, or another mod's control while seated
+        // The stock wheel, winch or pump latched as worked from this seat, and how long its handles have been past
+        // the outer band. The latch is on the control itself, so a heeling boat or a wheel turning under the hands
+        // never re-decides the seat; only letting go, taking another control, or a new sit does.
+        private Transform _seatedControl;
+        private float _outOfReachFor;
+        private bool _reachLost;
+        private float _lastNeed;
+        private float _lastOffFacing;
+
+        // The seat is one holder of the controls among several: charts, markets, sticky controls, beds and other mods
+        // turn them off and on around it. While the seat holds them, SeatKeepsControlsPatch counts the others'
+        // turn-offs and skips their hand-backs, and standing up hands them back only when nothing else still has them.
+        private int _heldElsewhere;          // SetPlayerControl(false) calls by other code while the seat holds the controls, not yet handed back
+        private bool _ownCall;               // Seating's own SetPlayerControl calls, which are not counted
+        private int _tickFrame;              // the last frame Update ran; the patch stands aside once Update stops
+        private Transform _frozenParent;     // where the switched-off controller was left when sitting
+        private Vector3 _frozenLocal;        // aboard: its local position on the walking copy
+        private Vector3 _frozenFromAnchor;   // ashore: its offset from the seat's anchor, world space
+        private const string TookControl = "took a control";
+        private const string ReachLost = "the control moved out of reach";
+        private const string FacingLost = "the seat turned away from the control";
+        // How far past the reach a latched control may drift, and for how long, before the seat ends. Inside the
+        // band the arms simply stretch and fall short, so a wave or a quick heel cannot bounce a player off a seat.
+        private const float ReachSlackMeters = 0.30f;
+        private const float OutOfReachSeconds = 0.5f;
+        // Farthest round from the seat's facing a control may be and still be worked from it: the seated turn plus
+        // about 70 degrees of natural sideways reach. Past that the arms would have to go behind the back.
+        private const float MaxOffFacingDeg = 100f;
+        // The same slack for the facing as for the distance: a seat that turns under the player (a crate on a heeling
+        // deck, a chair sliding round) has to carry the control this far past it before the seat ends.
+        private const float FacingSlackDeg = 15f;
+        private const float MovedMeters = 0.3f;
+        // Stood up without the controls: once nothing that could be holding them is in sight for this long, and nothing
+        // has handed them back, they are handed back anyway, so a turn-off that is never paired cannot freeze the player.
+        private const float StrandedSeconds = 10f;
+        private bool _watchStranded;
+        private float _strandedFor;          // unscaled seconds with the controls off and no holder in sight
+        private Transform _strandedParent;   // the switched-off controller's parent and local position last frame, to tell
+        private Vector3 _strandedLocal;      // when something is still moving it
 
         // Turning the view with the body when the legs swing over or the seat changes: added on top of the
         // player's own mouse look, eased, so they can keep looking around during it.
@@ -153,6 +205,7 @@ namespace SailwindPlayerModel
         private string _hint;
         private float _hintUntil;
         private GUIStyle _labelStyle;
+        private float _labelScale;       // the SailwindSkin.UiScale _labelStyle was built at
 
         // The hot seat: seconds sat on a lit stove (cooling off twice as fast once off it), when the pants stop
         // burning, and a hop off the stove owed once control is back.
@@ -190,6 +243,12 @@ namespace SailwindPlayerModel
 
         private void Awake() { Instance = this; }
         private void OnDestroy() { if (Instance == this) Instance = null; }
+
+        private void OnDisable()
+        {
+            try { _seat = null; ClearSeatedControl(); if (_controlTaken || _rising) FinishStand(); }
+            catch (System.Exception e) { Plugin.Log.LogError("[Seating] " + e); }
+        }
 
         /// <summary>True while the local player is sitting.</summary>
         public static bool IsSeated { get { return Instance != null && Instance._seat != null; } }
@@ -238,6 +297,7 @@ namespace SailwindPlayerModel
 
         private void Update()
         {
+            _tickFrame = Time.frameCount;
             try
             {
                 if (!GameState.playing || Refs.observerMirror == null || Refs.charController == null)
@@ -251,41 +311,80 @@ namespace SailwindPlayerModel
                 if (HotSeat()) return;
                 if (_rising) { Rise(); return; }
 
-                bool keys = !GameState.inCursorMenu;
+                bool keys = !GameState.inCursorMenu && !GameState.sleeping;   // no standing up or swinging legs while passed out
                 if (_seat == null)
                 {
-                    if (keys && SeatingTuning.Enabled.Value && SeatingTuning.SitKey.Value.IsDown()) TrySitHere();
+                    WatchStranded();
+                    if (keys && SeatingTuning.Enabled.Value && SitKeyDown()) TrySitHere();
                     return;
                 }
 
+                TrackSeatedHold();
                 string why = StillSeatedReason();
                 if (why != null)
                 {
                     Plugin.Log.LogInfo("[Seating] stood up: " + why);
-                    StandUp(false);
+                    // Taking hold of the wheel, a winch or the pump eases the view up, and so does one worked from the
+                    // seat drifting out of reach. A sail pusher or a mouse-held control stands at once, so a co-op
+                    // guest's push is not held off by the rise (co-op reads a switched-off controller as not pushing).
+                    bool smooth = (why == TookControl || _reachLost) && LocalInteraction.StickyControl(LocalInteraction.Pointer) != null;
+                    _reachLost = false;
+                    StandUp(smooth);
                     return;
                 }
-                if (keys && (GameInput.GetKeyDown(InputName.MoveUp) || GameInput.GetKeyDown(InputName.MoveDown) ||
+                // A hand-back the patch did not see (a mod writing the enabled flags itself) ended whatever held the
+                // controls: drop the count and take them back.
+                if (Refs.charController.enabled)
+                {
+                    if (_heldElsewhere > 0) RetakeSeatEyeNextFrame();
+                    _heldElsewhere = 0;
+                    SetControls(false);
+                    Plugin.Log.LogInfo("[Seating] took the controls back: handed back while sitting");
+                }
+                // Working a tiller or another mod's control from the seat uses the movement keys, so they do not stand you up then.
+                if (keys && !_holdingFromSeat && (GameInput.GetKeyDown(InputName.MoveUp) || GameInput.GetKeyDown(InputName.MoveDown) ||
                              GameInput.GetKeyDown(InputName.MoveLeft) || GameInput.GetKeyDown(InputName.MoveRight) ||
                              GameInput.GetKeyDown(InputName.Jump)))
                 {
                     StandUp(true);
                     return;
                 }
-                if (keys && SeatingTuning.SitKey.Value.IsDown())
+                if (keys && !_holdingFromSeat && SitKeyDown())
                 {
                     if (_seat.Spar) ToggleSpar();
                     else if (_seat.Edge) TrySwingLegs();
                     else if (_seat.Floor) NextFloorPose();
                 }
-                if (_seat != null) Pin();
+                if (_seat != null)
+                {
+                    // Whatever held the controls during the seat handed them back a frame ago or more: take the camera's place
+                    // on its mount again, wherever that left it (Three Sheets' physical fall leaves it 0.3 m down), so the
+                    // view is back at the seat.
+                    if (_retakeSeatEye && _heldElsewhere == 0 && Time.frameCount > _retakeSeatEyeFrame) TakeSeatEye(Refs.observerMirror.transform);
+                    Pin();
+                }
             }
             catch (System.Exception e)
             {
                 Plugin.Log.LogError("[Seating] " + e);
-                if (_seat != null || _rising) FinishStand();
                 _seat = null;
+                ClearSeatedControl();
+                if (_controlTaken || _rising) FinishStand();
             }
+        }
+
+        /// <summary>
+        /// Whether the sit key went down this frame. Read from the keyboard the way the camera keys are, since
+        /// this is a key pressed with the movement keys held, which is what KeyboardShortcut.IsDown refuses.
+        /// </summary>
+        private static bool SitKeyDown()
+        {
+            KeyboardShortcut shortcut = SeatingTuning.SitKey.Value;
+            KeyCode main = shortcut.MainKey;
+            if (main == KeyCode.None || !Input.GetKeyDown(main)) return false;
+            foreach (KeyCode k in shortcut.Modifiers)
+                if (!Input.GetKey(k)) return false;
+            return true;
         }
 
         /// <summary>
@@ -331,7 +430,7 @@ namespace SailwindPlayerModel
                     _smokeHinted = false;
                     Plugin.Log.LogInfo("[Seating] jumped off the stove");
                     StandUp(false);
-                    _hopOwed = true;
+                    _hopOwed = Refs.charController.enabled;   // no delayed hop when a held control or a blackout keeps the controls
                     thrown = true;
                 }
             }
@@ -369,15 +468,160 @@ namespace SailwindPlayerModel
         {
             var s = _seat;
             if (s.Anchor == null || !s.Anchor.gameObject.activeInHierarchy) return "the seat is gone";
-            if (s.OnBoat && Refs.observerMirror.transform.parent != s.Anchor) return "no longer aboard that boat";
+            // Passing out or a tavern room outside a bed pins nothing and moves nothing (Sleep.FallAsleep), so the player
+            // sleeps where they sit.
+            if (GameState.inBed || GameState.recovering || GameState.currentShipyard != null) return "the game took over";
+            if (GameState.currentBoat != s.AboardBoat || (s.OnBoat && Refs.observerMirror.transform.parent != s.Anchor)) return "no longer aboard that boat";
+            if (ControllerMoved(s)) return "something moved the player";
             if (s.Item != null && s.Item.held != null) return "the chair was picked up";
             if (s.Item != null && Seating.IsChair(s.Item as ShipItem) && Vector3.Dot(s.Item.transform.TransformDirection(Vector3.forward), Vector3.up) < 0.6f) return "the chair tipped over";
-            if (GameState.inBed || GameState.sleeping || GameState.recovering || GameState.currentShipyard != null) return "the game took over";
             if (PlayerSwimming.swimming) return "in the water";
-            if (Refs.charController.enabled) return "something else gave back control";
+            // A control worked from the seat that has drifted out of reach and stayed there: the boat heeled, the
+            // crate slid or turned under the player, a shipyard rebuild moved the winch.
+            if (_seatedControl != null && _outOfReachFor >= OutOfReachSeconds)
+            {
+                _reachLost = true;
+                return _lastOffFacing > MaxOffFacingDeg + FacingSlackDeg
+                    ? FacingLost + $" ({_lastOffFacing:F0} degrees round)"
+                    : ReachLost + $" ({_lastNeed:F2} m)";
+            }
+            // Something else handing the controls back is not a reason: the patch keeps those hand-backs while seated.
             Transform control;
-            if (PlayerModel.GetLocalControl(out control) != InteractionKind.None) return "took a control";
+            var kind = PlayerModel.GetLocalControl(out control);
+            if (kind != InteractionKind.None && control != _seatedControl
+                && !(kind == InteractionKind.Helm && RotorSpecs.IsTiller(control))) return TookControl;
             return null;
+        }
+
+        /// <summary>
+        /// A tiller can be steered from a seat, the way a small boat is sailed, and so can another mod's sticky control
+        /// this mod has no pose for (HMS Leopard's oars, the Realistic Skies telescope), which reads the movement keys
+        /// too. A stock ship's wheel, winch, anchor winch or bilge pump joins them whenever its handles are within
+        /// reach of the seated body. The game takes the controls when such a control is taken hold of and hands them
+        /// back when it is let go; the seat keeps that hand-back, so the player stays sitting.
+        /// </summary>
+        private void TrackSeatedHold()
+        {
+            Transform control;
+            var kind = PlayerModel.GetLocalControl(out control);
+            bool tiller = kind == InteractionKind.Helm && RotorSpecs.IsTiller(control);
+            var sticky = LocalInteraction.StickyControl(LocalInteraction.Pointer);
+            bool modded = kind == InteractionKind.None && sticky != null && sticky.isActiveAndEnabled;
+            // A stock control is worked from the seat only on a sticky click. Held with the mouse instead (the game's
+            // steer-with-mouse and winches-with-mouse settings) the game keeps it in clickedButton and turns mouse
+            // look off, so there is no sticky control, this fails, and the player stands at once as they did before.
+            bool stock = false;
+            if (!tiller && !modded && (kind == InteractionKind.Helm || kind == InteractionKind.Crank)
+                && sticky != null && sticky.isActiveAndEnabled && sticky.transform == control)
+            {
+                if (control == _seatedControl) stock = true;
+                else if (TakeControlFromSeat(control)) { _seatedControl = control; _outOfReachFor = 0f; stock = true; }
+            }
+            if (!stock && _seatedControl != null) { _seatedControl = null; _outOfReachFor = 0f; }
+            if (stock) TrackReachBand(control);
+
+            bool hold = tiller || modded || stock;
+            if (!hold && _holdingFromSeat)
+            {
+                // Not a let-go when another control was taken instead: that stands the player up and says so.
+                if (kind == InteractionKind.None) Plugin.Log.LogInfo("[Seating] let go, still seated");
+                if (Refs.charController.enabled) SetControls(false);
+            }
+            else if (hold && !_holdingFromSeat && !stock)
+            {
+                Plugin.Log.LogInfo(tiller ? "[Seating] steering a tiller from the seat" : "[Seating] working '" + sticky.name + "' from the seat");
+            }
+            _holdingFromSeat = hold;
+        }
+
+        /// <summary>
+        /// Whether a stock wheel, winch or pump just taken hold of can be worked from where the player sits: its
+        /// handles have to be within the seated body's reach and not round behind the seat. Decided once, on the
+        /// frame the hold starts. Anything that cannot be measured keeps the old path and stands the player up.
+        /// </summary>
+        private bool TakeControlFromSeat(Transform control)
+        {
+            var s = _seat;
+            if (s == null) return false;
+            // A body on the deck is not at a station: the floor poses hold it up on its hands or wrap the arms
+            // round the knees, so they stand up to a control as before.
+            if (s.Pose == SeatPose.FloorLegsOut || s.Pose == SeatPose.FloorCrossLegged
+                || s.Pose == SeatPose.FloorKneeUp || s.Pose == SeatPose.FloorKneesHugged) return false;
+
+            float need, limit, offFacing;
+            if (!MeasureSeatedReach(control, out need, out limit, out offFacing))
+            {
+                Plugin.Log.LogInfo("[Seating] took a control: no body to measure the reach from");
+                return false;
+            }
+            _lastNeed = need;
+            _lastOffFacing = offFacing;
+            if (need > limit)
+            {
+                Plugin.Log.LogInfo($"[Seating] out of reach: '{control.name}' grip {need:F2} m away, reach {limit:F2} m");
+                return false;
+            }
+            if (offFacing > MaxOffFacingDeg)
+            {
+                Plugin.Log.LogInfo($"[Seating] out of reach: '{control.name}' is {offFacing:F0} degrees round from the way the seat faces");
+                return false;
+            }
+            Plugin.Log.LogInfo($"[Seating] working {ControlName(control)} from the seat: grip {need:F2} m away, reach {limit:F2} m");
+            return true;
+        }
+
+        /// <summary>
+        /// Watch a latched control for the boat heeling, the seat sliding or turning, or a rebuild taking it out of
+        /// reach or round behind the shoulder. Both bands are the ones the hold was granted on with slack added, so
+        /// anything nearer leaves the arms to stretch and fall short, which is how every other overreach in this mod
+        /// already looks, and a slow drift across a band cannot bounce a player off a seat.
+        /// </summary>
+        private void TrackReachBand(Transform control)
+        {
+            float need, limit, offFacing;
+            if (!MeasureSeatedReach(control, out need, out limit, out offFacing))
+            {
+                _outOfReachFor = 0f;   // nothing to measure: keep the seat rather than guess
+                return;
+            }
+            _lastNeed = need;
+            _lastOffFacing = offFacing;
+            if (need > limit + ReachSlackMeters || offFacing > MaxOffFacingDeg + FacingSlackDeg)
+                _outOfReachFor += Time.unscaledDeltaTime;
+            else _outOfReachFor = 0f;
+        }
+
+        /// <summary>
+        /// How far the body would have to reach for a control from the seat it has this frame, how far it can reach
+        /// sitting there, and how far round from the seat's facing the control lies. False without a fitted body.
+        /// </summary>
+        private bool MeasureSeatedReach(Transform control, out float need, out float limit, out float offFacingDeg)
+        {
+            need = 0f;
+            limit = 0f;
+            offFacingDeg = 0f;
+            var body = PlayerModel.Body;
+            if (body == null) return false;
+            Vector3 hips, forward;
+            SeatPose pose;
+            float floorY;
+            if (!TryGetSeat(out hips, out forward, out pose, out floorY)) return false;
+            return body.TryMeasureSeatedReach(control, hips, forward, out need, out limit, out offFacingDeg);
+        }
+
+        /// <summary>The wheel by its job, anything else by its object's name.</summary>
+        private static string ControlName(Transform control)
+        {
+            return control.GetComponent<GPButtonSteeringWheel>() != null ? "the wheel" : "'" + control.name + "'";
+        }
+
+        /// <summary>Forget the control worked from the seat, wherever the seat itself ends.</summary>
+        private void ClearSeatedControl()
+        {
+            _seatedControl = null;
+            _outOfReachFor = 0f;
+            _reachLost = false;
+            _lastOffFacing = 0f;
         }
 
         /// <summary>
@@ -430,7 +674,17 @@ namespace SailwindPlayerModel
                 StandUp(false);
                 return;
             }
-            observer.position += correction;
+            // Settled, the observer ends up the head rig's height (about a meter) from the seated eye, however the boat
+            // heels or the world shifts. Farther than 4 m means the rig is being carried off a little every frame, which
+            // the check above never sees, so stand up rather than follow it.
+            Vector3 pinned = observer.position + correction;
+            if (t >= 1f && (pinned - seated).sqrMagnitude > 4f * 4f)
+            {
+                Plugin.Log.LogWarning($"[Seating] stood up: the body would have been {(pinned - seated).magnitude:F1} m from the seat");
+                StandUp(false);
+                return;
+            }
+            observer.position = pinned;
         }
 
         // ---- sitting down ------------------------------------------------------------------------------
@@ -947,9 +1201,18 @@ namespace SailwindPlayerModel
 
         private void Sit(Seat s, string what)
         {
+            BoatRefs aboard = BoatAboard();
+            BoatRefs seatBoat = BoatOf(s);
+            if (seatBoat != aboard)
+            {
+                Hint(aboard != null && seatBoat == null ? "Step ashore to sit there." : "Step aboard to sit there.");
+                return;
+            }
+
             Transform observer = Refs.observerMirror.transform;
             _seat = s;
             _sitTime = Time.time;
+            TakeSeatEye(observer);
             _startEyeLocal = s.Anchor.InverseTransformPoint(EyeWorld(observer));
             _startYaw = observer.localEulerAngles.y;
             _targetYaw = YawInParent(observer, Flat(s.Anchor.TransformDirection(s.LocalForward)));
@@ -957,9 +1220,16 @@ namespace SailwindPlayerModel
             _turnGoal = _turnDone = _turnVel = 0f;
             _swingSign = 1f;
 
-            Refs.SetPlayerControl(false);
+            _heldElsewhere = 0;
+            _watchStranded = false;
+            SetControls(false);
             Refs.observerMirror.enabled = false;
             _controlTaken = true;
+            Transform controller = Refs.charController.transform;
+            _frozenParent = controller.parent;
+            _frozenLocal = controller.localPosition;
+            _frozenFromAnchor = controller.position - s.Anchor.position;
+            s.AboardBoat = GameState.currentBoat;
             if (Refs.ovrCameraRig != null)
             {
                 var crouch = Refs.ovrCameraRig.GetComponent<PlayerCrouching>();
@@ -981,6 +1251,8 @@ namespace SailwindPlayerModel
         private void StandUp(bool smooth)
         {
             _seat = null;
+            _holdingFromSeat = false;
+            ClearSeatedControl();
             _turnGoal = _turnDone = _turnVel = 0f;
             if (!smooth || !FramesMatch()) { FinishStand(); return; }
             _rising = true;
@@ -991,7 +1263,9 @@ namespace SailwindPlayerModel
         /// <summary>Ease the view back up to the standing player before handing control back.</summary>
         private void Rise()
         {
-            if (!FramesMatch()) { FinishStand(); return; }
+            // A bed pins the observer (Sleep.Update) and recovery writes it. Nothing pins it in a sleep outside a bed, so
+            // the rise finishes under the fade.
+            if (GameState.inBed != null || GameState.recovering || !FramesMatch()) { FinishStand(); return; }
             float t = Smooth01((Time.time - _riseTime) / RiseSeconds);
             Refs.observerMirror.transform.localPosition = Vector3.Lerp(_riseFrom, Refs.charController.transform.localPosition, t);
             if (t >= 1f) FinishStand();
@@ -1000,10 +1274,29 @@ namespace SailwindPlayerModel
         private void FinishStand()
         {
             _rising = false;
+            _holdingFromSeat = false;
+            ClearSeatedControl();
             if (!_controlTaken) return;
+            string keep = null;
+            try { keep = KeepControlsReason(); }
+            catch (System.Exception e) { Plugin.Log.LogError("[Seating] " + e); }   // fail open: hand the controls back
             _controlTaken = false;
-            if (Refs.observerMirror != null) Refs.observerMirror.enabled = true;
-            if (Refs.charController != null && !GameState.inBed && !GameState.sleeping) Refs.SetPlayerControl(true);
+            _heldElsewhere = 0;
+            // In bed, Sleep.LeaveBed turns the mirror back on. Turning it on here drags the view to the pre-sit spot.
+            if (Refs.observerMirror != null && GameState.inBed == null) Refs.observerMirror.enabled = true;
+            if (keep != null)
+            {
+                Plugin.Log.LogInfo("[Seating] stood up without the controls: " + keep);
+                _watchStranded = true;
+                _strandedFor = 0f;
+                if (Refs.charController != null)
+                {
+                    _strandedParent = Refs.charController.transform.parent;
+                    _strandedLocal = Refs.charController.transform.localPosition;
+                }
+                return;
+            }
+            if (Refs.charController != null && Refs.ovrController != null) SetControls(true);
         }
 
         /// <summary>
@@ -1017,16 +1310,130 @@ namespace SailwindPlayerModel
             return o != null && c != null && (o == c || o.name == c.name || GameState.currentBoat != null);
         }
 
+        // ---- sharing the controls ----------------------------------------------------------------------
+
+        /// <summary>
+        /// Every Refs.SetPlayerControl call, through SeatKeepsControlsPatch. While the seat holds the controls, other code's
+        /// turn-offs are counted and its hand-backs are skipped (false), so closing a chart or letting go of a control
+        /// leaves the player seated.
+        /// </summary>
+        internal bool AllowSetPlayerControl(bool state)
+        {
+            if (_ownCall) return true;
+            // Stands aside when not seated, and when Update has stopped running, so a stuck seat never swallows the game's hand-backs.
+            if (!_controlTaken || Time.frameCount - _tickFrame > 2)
+            {
+                if (state) _watchStranded = false;   // whoever held the controls after standing up handed them back
+                return true;
+            }
+            if (!state) { _heldElsewhere++; return true; }
+            if (_heldElsewhere > 0)
+            {
+                _heldElsewhere--;
+                // The last holder is done, and so is whatever it did to the view (Three Sheets stands the camera back up
+                // just after handing the controls back).
+                if (_heldElsewhere == 0) RetakeSeatEyeNextFrame();
+            }
+            Plugin.Log.LogInfo("[Seating] kept the controls: handed back while sitting");
+            return false;
+        }
+
+        /// <summary>True while the seat holds the controls and something that turned them off during the seat has not handed them back.</summary>
+        internal static bool ControlsHeldElsewhere { get { return Instance != null && Instance._controlTaken && Instance._heldElsewhere > 0; } }
+
+        private void SetControls(bool on)
+        {
+            _ownCall = true;
+            try { Refs.SetPlayerControl(on); }
+            finally { _ownCall = false; }
+        }
+
+        /// <summary>Whether something moved the switched-off controller since sitting down (a ladder, the ratlines, a teleport).</summary>
+        private bool ControllerMoved(Seat s)
+        {
+            Transform c = Refs.charController.transform;
+            if (c.parent != _frozenParent) return true;
+            float limit = MovedMeters * MovedMeters;
+            // Aboard, the switched-off controller hangs off the walking copy, and only deliberate movers write it (the
+            // ratlines, the Shipyard Expansion ladder, co-op placement).
+            if (s.AboardBoat != null) return (c.localPosition - _frozenLocal).sqrMagnitude > limit;
+            // Ashore it hangs off the shifting world, whose children the floating origin moves one by one, so it is measured
+            // from the seat, which moves with it. This catches the game's boat ladders and the Realistic Skies observatory ladder.
+            // A seat on an item is left out: the controller cannot move ashore, so a chair or crate settling, sliding or
+            // being nudged is all this would measure. Pin's own distance guards still catch a real teleport.
+            if (s.Item != null) return false;
+            return (c.position - s.Anchor.position - _frozenFromAnchor).sqrMagnitude > limit;
+        }
+
+        /// <summary>Why standing up leaves the controls off for their other holder to hand back, or null to hand them back now.</summary>
+        private string KeepControlsReason()
+        {
+            if (GameState.inBed != null) return "in bed";
+            if (GameState.sleeping) return "asleep";
+            if (GameState.recovering) return "recovering";
+            if (LocalInteraction.StickyControl(LocalInteraction.Pointer) != null) return "holding a control";
+            if (_heldElsewhere > 0) return "something else has them";
+            return null;
+        }
+
+        /// <summary>
+        /// After standing up without the controls: once nothing that could still be holding them is in sight for a while,
+        /// nothing is moving the player, and nothing has handed them back, hand them back. Every known holder pairs its
+        /// turn-off with a hand-back, so this only catches one that never does.
+        /// </summary>
+        private void WatchStranded()
+        {
+            if (!_watchStranded) return;
+            try
+            {
+                if (Refs.charController.enabled) { _watchStranded = false; return; }
+                // Something moving the switched-off controller holds the controls while it does: a Shipyard Expansion ladder
+                // at its slowest climb speed takes longer than the timeout to reach a masthead. A floating-origin shift
+                // ashore also counts once, which only restarts the wait.
+                Transform c = Refs.charController.transform;
+                if (c.parent != _strandedParent || (c.localPosition - _strandedLocal).sqrMagnitude > 1e-6f)
+                {
+                    _strandedParent = c.parent;
+                    _strandedLocal = c.localPosition;
+                    _strandedFor = 0f;
+                    return;
+                }
+                if (ControlsVisiblyHeld()) { _strandedFor = 0f; return; }
+                _strandedFor += Time.unscaledDeltaTime;
+                if (_strandedFor < StrandedSeconds) return;
+                Plugin.Log.LogInfo($"[Seating] gave the controls back: nothing handed them back {StrandedSeconds:F0} s after standing up");
+            }
+            catch (System.Exception e) { Plugin.Log.LogError("[Seating] " + e); }   // fail open: hand the controls back
+            _watchStranded = false;
+            if (Refs.charController != null && Refs.ovrController != null) SetControls(true);
+        }
+
+        /// <summary>Something that holds the controls for as long as it shows: a menu, a bed, sleep, recovery, loading, a held control.</summary>
+        private static bool ControlsVisiblyHeld()
+        {
+            return !GameState.playing || GameState.currentlyLoading || GameState.inCursorMenu || GameState.inBed != null
+                || GameState.sleeping || GameState.recovering || GameState.currentShipyard != null
+                // The co-op join blackout and Three Sheets' blackout turn mouse look off along with the controls.
+                || !MouseLook.MouseLookIsEnabled()
+                || Downed.HoldsView
+                || LocalInteraction.StickyControl(LocalInteraction.Pointer) != null;
+        }
+
         // ---- checks ------------------------------------------------------------------------------------
 
         private static string CannotSitReason()
         {
             if (GameState.inBed || GameState.sleeping || GameState.recovering || GameState.currentlyLoading) return "";
-            if (GameState.currentShipyard != null || GameState.inCursorMenu || BoatCamera.on) return "";
+            if (GameState.currentShipyard != null || GameState.inCursorMenu) return "";
+            // Both third person views take the eye camera away to the orbit rig, so the ray the sit key casts would
+            // start behind the player. Refused, but said out loud rather than swallowed.
+            if (BoatCamera.on) return "Switch to first person to sit down.";
             if (PlayerSwimming.swimming) return "Can't sit while swimming.";
-            if (!Refs.charController.enabled) return "";
             Transform control;
-            if (PlayerModel.GetLocalControl(out control) != InteractionKind.None) return "";
+            bool holding = LocalInteraction.StickyControl(LocalInteraction.Pointer) != null || PlayerModel.GetLocalControl(out control) != InteractionKind.None;
+            // Logged only: an empty reason puts nothing on screen.
+            if (holding) { Plugin.Log.LogInfo("[Seating] refused: holding a control, let go of it first"); return ""; }
+            if (!Refs.charController.enabled) return "";
             var pointer = LocalInteraction.Pointer;
             var held = pointer != null ? pointer.GetHeldItem() : null;
             if (held != null && held.big) return "Put it down first.";
@@ -1290,6 +1697,29 @@ namespace SailwindPlayerModel
             return h.Collider.transform;
         }
 
+        /// <summary>
+        /// The boat a seat is part of, by the object carrying BoatRefs, or null for anything ashore. The game disembarks a
+        /// player whose view touches what is not part of their boat, and a seated view sits low enough to touch the seat,
+        /// so a seat has to be on the same side of the boat's edge as the player. Items aboard hang off the boat, so they
+        /// count as part of it.
+        /// </summary>
+        private static BoatRefs BoatOf(Seat s)
+        {
+            Transform t = s.OnBoat ? s.Anchor : (s.Ignore != null ? s.Ignore : s.Anchor);
+            if (t == null) return null;
+            // The hull copy the view collides with (layer 12) is made at the scene root; its owner is the hull.
+            var hull = t.GetComponent<CleanableObjectCollider>();
+            if (hull != null && hull.parentCleanable != null) t = hull.parentCleanable.transform;
+            return t.GetComponentInParent<BoatRefs>();
+        }
+
+        /// <summary>The boat the player is aboard, from the visible player's parent, which boarding sets together with GameState.currentBoat.</summary>
+        private static BoatRefs BoatAboard()
+        {
+            Transform p = Refs.observerMirror.transform.parent;
+            return p != null ? p.GetComponentInParent<BoatRefs>() : null;
+        }
+
         private static string Describe(Hit h)
         {
             var c = h.Collider;
@@ -1350,15 +1780,91 @@ namespace SailwindPlayerModel
 
         private static Vector3 _eyeLocal = new Vector3(0f, 0.75f, 0f);
 
+        // Seated, the eye camera's local position on its mount, as the seat keeps it (see TakeSeatEye).
+        private static Vector3 _seatEyeOnMount;
+        private static bool _retakeSeatEye;       // take it again: whatever else held the controls during the seat handed them back
+        private static int _retakeSeatEyeFrame;   // the frame that asked, so the holder has had its LateUpdate to put the view back
+        private static bool _eyeAway;             // the orbit camera had the eye camera the last time it was looked for
+        // Seated, the eye camera this far from its place on the mount means something else is moving the view.
+        private const float EyeDisplacedMeters = 0.1f;
+
         /// <summary>
         /// Where the first-person eye is on the body, world space. Read live while the eye camera hangs off the
         /// observer; while the orbit camera has taken it away, the last offset measured in first person stands in.
+        ///
+        /// Read from the camera's mount (TrackingSpace), where the game keeps the camera at local zero, not from the
+        /// camera itself. Crouching and head bob move the rig above the mount and a bed moves the mount, so those still
+        /// count. An effect that places the camera does not: Three Sheets' blackout fall sets the camera's world position
+        /// every frame, and pinning the observer to that camera moved the observer by the same step every frame.
+        ///
+        /// Seated, the camera's place on the mount as taken when the seat started is added, so a camera another mod left
+        /// off its mount before sitting (Three Sheets' physical fall leaves it 0.3 m down) still sits at the seated eye.
+        /// Not seated (a bed, knocked down), the mount alone.
         /// </summary>
         internal static Vector3 EyeWorld(Transform observer)
         {
-            Transform eye = EyeTransform();
-            if (eye != null && eye.IsChildOf(observer)) _eyeLocal = observer.InverseTransformPoint(eye.position);
+            Transform eye, mount;
+            if (EyeOnBody(observer, out eye, out mount))
+                _eyeLocal = observer.InverseTransformPoint(IsSeated && mount != eye ? mount.TransformPoint(_seatEyeOnMount) : mount.position);
             return observer.TransformPoint(_eyeLocal);
+        }
+
+        /// <summary>
+        /// The eye camera and the mount it hangs from, while the camera hangs off the observer; false while the orbit
+        /// camera has it. The only way back is BoatCamera.SwitchOff, which puts the camera at local zero on the mount, so
+        /// the seat's record of it goes to zero too. A camera found exactly at zero counts the same: ashore, with the
+        /// follow camera off, the game switches the orbit camera on and straight back off within one frame, so nothing
+        /// sees it away.
+        /// </summary>
+        private static bool EyeOnBody(Transform observer, out Transform eye, out Transform mount)
+        {
+            eye = EyeTransform();
+            mount = null;
+            if (eye == null) return false;
+            if (!eye.IsChildOf(observer)) { _eyeAway = true; return false; }
+            mount = eye.parent != null && eye.parent != observer ? eye.parent : eye;
+            if (_eyeAway || eye.localPosition == Vector3.zero)
+            {
+                _eyeAway = false;
+                _seatEyeOnMount = Vector3.zero;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Record the eye camera's local position on its mount for the seat to keep. Taken when the seat starts, and again
+        /// a frame after whatever else took the controls during the seat hands them back, once it has put the view back.
+        /// Never read every frame: a camera another mod places in world space would feed back into the pin again.
+        /// </summary>
+        private static void TakeSeatEye(Transform observer)
+        {
+            _retakeSeatEye = false;
+            Transform eye, mount;
+            _seatEyeOnMount = EyeOnBody(observer, out eye, out mount) && mount != eye ? eye.localPosition : Vector3.zero;
+        }
+
+        private static void RetakeSeatEyeNextFrame()
+        {
+            _retakeSeatEye = true;
+            _retakeSeatEyeFrame = Time.frameCount;
+        }
+
+        /// <summary>
+        /// True while seated in first person with the eye camera more than 10 cm from where the seat keeps it on its
+        /// mount: something else is moving the view, such as a Three Sheets blackout fall or collapse, and would look back
+        /// at the seated body from outside it. The game only moves the camera on its mount through the orbit camera, which
+        /// takes it off the observer first (crouching and head bob move the rig above the mount, and sitting, turning,
+        /// the boat and the world shifting move the observer), so this stays false in normal play.
+        /// </summary>
+        internal static bool EyeDisplaced
+        {
+            get
+            {
+                if (!IsSeated || Refs.observerMirror == null) return false;
+                Transform eye, mount;
+                if (!EyeOnBody(Refs.observerMirror.transform, out eye, out mount) || mount == eye) return false;
+                return mount.TransformVector(eye.localPosition - _seatEyeOnMount).sqrMagnitude > EyeDisplacedMeters * EyeDisplacedMeters;
+            }
         }
 
         private static Transform _eye;
@@ -1420,22 +1926,29 @@ namespace SailwindPlayerModel
         private void OnGUI()
         {
             if (!GameState.playing || GameState.inCursorMenu) return;
-            bool seated = _seat != null && SeatingTuning.ShowSeatedLabel.Value && !BoatCamera.on;
+            bool seated = _seat != null && SeatingTuning.ShowSeatedLabel.Value && !BoatCamera.on && !GameState.sleeping;
             bool hint = _hint != null && Time.time < _hintUntil;
             if (!seated && !hint) return;
 
-            if (_labelStyle == null)
+            // Sized like the Character screen (SailwindSkin.UiScale), with no fitting: it is one centered line.
+            // The style is rebuilt only when the scale changes, which is a resize or the setting, not per frame.
+            float s = SailwindSkin.UiScale;
+            if (_labelStyle == null || s != _labelScale)
             {
-                _labelStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, fontSize = 18 }.WithFont();
+                var stock = GUI.skin.label;
+                _labelStyle = new GUIStyle(stock) { alignment = TextAnchor.MiddleCenter, fontSize = SailwindSkin.Px(18f, s) }.WithFont();
+                _labelStyle.padding = new RectOffset(SailwindSkin.Px(stock.padding.left, s), SailwindSkin.Px(stock.padding.right, s),
+                    SailwindSkin.Px(stock.padding.top, s), SailwindSkin.Px(stock.padding.bottom, s));
                 _labelStyle.normal.textColor = Color.white;
+                _labelScale = s;
             }
             var old = GUI.color;
-            var rect = new Rect(0f, Screen.height - 64f, Screen.width, 28f);
+            var rect = new Rect(0f, Screen.height - SailwindSkin.Px(64f, s), Screen.width, SailwindSkin.Px(28f, s));
             if (hint)
             {
                 GUI.color = new Color(1f, 1f, 1f, 0.8f);
                 GUI.Label(rect, _hint, _labelStyle);
-                rect.y -= 26f;
+                rect.y -= SailwindSkin.Px(26f, s);
             }
             if (seated)
             {
@@ -1456,6 +1969,20 @@ namespace SailwindPlayerModel
         {
             if (__instance == null || !__instance.sold || __instance.held != null || !Seating.IsChair(__instance)) return;
             if (Seating.Instance != null) Seating.Instance.TrySitOnChair(__instance);
+        }
+    }
+
+    /// <summary>
+    /// While the local player sits, other code's hand-backs of the controls are kept by the seat and its turn-offs are
+    /// counted (see Seating.AllowSetPlayerControl). Stands aside when not seated or when Seating has stopped updating.
+    /// </summary>
+    [HarmonyPatch(typeof(Refs), nameof(Refs.SetPlayerControl))]
+    internal static class SeatKeepsControlsPatch
+    {
+        private static bool Prefix(bool state)
+        {
+            try { return Seating.Instance == null || Seating.Instance.AllowSetPlayerControl(state); }
+            catch (System.Exception e) { Plugin.Log.LogError("[Seating] " + e); return true; }
         }
     }
 }

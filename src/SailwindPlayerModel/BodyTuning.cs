@@ -28,6 +28,7 @@ namespace SailwindPlayerModel
         public static ConfigEntry<float> LookPitchMaxDeg { get; private set; }
         public static ConfigEntry<string> Appearance { get; private set; }
         public static ConfigEntry<float> MenuButtonScale { get; private set; }
+        public static ConfigEntry<float> UIScale { get; private set; }
         public static ConfigEntry<bool> SwimAnimation { get; private set; }
 
         public static void Bind(ConfigFile cfg)
@@ -77,18 +78,24 @@ namespace SailwindPlayerModel
             // LOOK-LEAN. The upper body (Spine_01 -> chest/head/arms) pitches on the hips toward where the
             // player looks vertically, in every state, composed on top of the crouch fold.
             LookPitchScale = cfg.Bind(SecPose, "LookPitchScale", 0.9f,
-                new ConfigDescription("Torso look-lean: fraction of your vertical look angle the upper body pitches on the hips (1.0 = follows your look 1:1). Looking DOWN folds the torso forward, looking UP leans it back. Set NEGATIVE to flip the direction if it bends the wrong way in-game.",
+                new ConfigDescription("Torso look-lean: fraction of your vertical look angle the upper body pitches on the hips (1.0 = follows your look 1:1). Looking DOWN folds the torso forward, looking UP leans it back. Set NEGATIVE to flip the direction if it bends the wrong way in-game. It fades out as the body faces away from where you look, for example sitting and looking to the side.",
                     new AcceptableValueRange<float>(-2f, 2f)));
             LookPitchMaxDeg = cfg.Bind(SecPose, "LookPitchMaxDeg", 55f,
                 new ConfigDescription("Clamp (degrees) on the torso look-lean so it never over-bends up or down. Must exceed the crouch fold (about 28 deg) for the torso to lean BACK past vertical while crouched and looking up.",
                     new AcceptableValueRange<float>(0f, 90f)));
 
             MenuButtonScale = cfg.Bind(SecMenu, "MenuButtonScale", 1f,
-                new ConfigDescription("Size of the buttons on the in-game pause menu, relative to vanilla. Default 1.0 is vanilla-sized; the parchment is made taller to fit them rather than the buttons being shrunk to fit the parchment. Lower it if you would rather have a shorter scroll. Applies the next time the menu lays out (open the pause menu again).",
+                new ConfigDescription("Size of the buttons on the in-game pause menu, relative to vanilla. Default 1.0 is vanilla-sized. The parchment stays the same size, so lowering it leaves more space between the buttons. Applies immediately, including while the menu is open.",
                     new AcceptableValueRange<float>(0.5f, 1f)));
+            // The pause menu above is world-space and already grows with the screen like the game's own menus.
+            // This one is for the screen-space panels, which are drawn in pixels. Read through
+            // SailwindSkin.UiScale, which adds the automatic part.
+            UIScale = cfg.Bind(SecMenu, "UIScale", 1f,
+                new ConfigDescription("Size of the Character screen, the seat hints and the (seated) label, on top of automatic sizing. At 1.0 they keep their 1080p size on screens 1080 pixels tall or shorter and grow with taller screens. The Character screen also shrinks to fit a window too small for it. Applies immediately.",
+                    new AcceptableValueRange<float>(0.5f, 2.5f)));
 
             Appearance = cfg.Bind(SecAppearance, "Character", "",
-                "Your character's appearance, as \"slot=variant\" pairs (e.g. \"gender=1;hair=3;torso=7\"). Normally written by an in-game character screen rather than edited here. Unknown slot names are ignored and out-of-range variants fall back to that slot's default, so a hand-edited value can never produce an invisible or broken character.");
+                "Your character's appearance, as \"slot=variant\" pairs (e.g. \"gender=1;hair=3;torso=7\"). Normally written by the Character screen in the pause menu rather than edited here. Gender 2 is female and anything else is male. A variant past the end of a slot's list wraps around to the start. 0 means none on hair and headgear, and wraps to the last variant on the other slots. The color slots (c_skin, c_hair, c_primary, c_secondary, c_leather, c_metal) pick from each color list, and 0 or a number past the end of the list keeps the color the game's NPC wears. Unknown slot names are ignored, and a hand-edited value cannot produce an invisible or broken character.");
         }
     }
 }

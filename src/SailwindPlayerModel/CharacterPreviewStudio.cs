@@ -30,7 +30,11 @@ namespace SailwindPlayerModel
     {
         private const int StudioLayer = 31;                        // unnamed and unused in this build
         private static readonly Vector3 StudioOrigin = new Vector3(0f, -8000f, 0f);
+        // The texture's 1080p size, which also fixes its shape. On taller screens the preview is drawn bigger,
+        // so the height is picked from what the screen asks for, in 64 px steps so a window being dragged
+        // does not recreate it every frame, and capped so 5K and up stop costing more VRAM.
         private const int TexWidth = 420, TexHeight = 620;
+        private const int TexHeightStep = 64, TexHeightMax = 1600;
 
         private static GameObject _root;
         private static GameObject _mannequin;
@@ -39,11 +43,78 @@ namespace SailwindPlayerModel
         private static float _yaw;
         private static int _settleFrames;
         private static bool _framedOnce;
+        private static float _requestedHeight;
+        private static bool _resizeFailed, _resizeLogged;
 
         /// <summary>The latest frame, or null when the studio is not up. Safe to read every OnGUI.</summary>
         public static RenderTexture Texture { get { return _rt; } }
 
         public static bool IsUp { get { return _root != null; } }
+
+        /// <summary>Height over width of the texture at its reference size. Every size it is made in keeps this shape.</summary>
+        public static float HeightPerWidth { get { return (float)TexHeight / TexWidth; } }
+
+        /// <summary>
+        /// How tall, in screen pixels, the character screen draws the preview. Read in LateUpdate, where the
+        /// texture is swapped before it renders, so OnGUI never shows a texture that has not been drawn into.
+        /// </summary>
+        public static void RequestHeight(float px)
+        {
+            _requestedHeight = px;
+        }
+
+        private static int WantedHeight()
+        {
+            float px = _requestedHeight;
+            if (float.IsNaN(px) || float.IsInfinity(px) || px <= TexHeight) return TexHeight;
+            return Mathf.Clamp(Mathf.CeilToInt(px / TexHeightStep) * TexHeightStep, TexHeight, TexHeightMax);
+        }
+
+        private static RenderTexture MakeTexture(int height)
+        {
+            int width = Mathf.RoundToInt(height * (float)TexWidth / TexHeight);
+            var rt = new RenderTexture(width, height, 16) { antiAliasing = 2 };
+            rt.hideFlags = HideFlags.HideAndDontSave;
+            return rt;
+        }
+
+        /// <summary>
+        /// Swap to a texture in the height bucket the screen last asked for, if that changed. The camera is
+        /// pointed at the new one before the old one is released. A failure keeps the texture it has and
+        /// stops resizing for the session: a preview at the 1080p resolution still works.
+        /// </summary>
+        private static void FitTexture()
+        {
+            if (_resizeFailed || _camera == null || _rt == null) return;
+            int want = WantedHeight();
+            if (want == _rt.height) return;
+            RenderTexture next = null;
+            try
+            {
+                next = MakeTexture(want);
+                _camera.targetTexture = next;
+                var old = _rt;
+                _rt = next;
+                old.Release();
+                Object.Destroy(old);
+                if (!_resizeLogged)
+                {
+                    _resizeLogged = true;   // once per open, so dragging a window edge does not log every step
+                    Plugin.Log.LogInfo("[Character] Preview texture resized to " + next.width + "x" + next.height + ".");
+                }
+            }
+            catch (System.Exception e)
+            {
+                _resizeFailed = true;
+                Plugin.Log.LogWarning("[Character] Could not resize the preview texture, keeping its size: " + e.Message);
+                try
+                {
+                    if (next != null && next != _rt) Object.Destroy(next);
+                    if (_camera != null) _camera.targetTexture = _rt;
+                }
+                catch { }
+            }
+        }
 
         /// <summary>Build the rig. Idempotent; a failure leaves nothing behind and simply means no preview.</summary>
         public static void Open()
@@ -100,8 +171,9 @@ namespace SailwindPlayerModel
                 _camera.allowHDR = false;
                 _camera.allowMSAA = false;
 
-                _rt = new RenderTexture(TexWidth, TexHeight, 16) { antiAliasing = 2 };
-                _rt.hideFlags = HideFlags.HideAndDontSave;
+                // At the size the screen last asked for, so reopening at 4K does not render one frame small.
+                _rt = MakeTexture(_resizeFailed ? TexHeight : WantedHeight());
+                _resizeLogged = false;
                 _camera.targetTexture = _rt;
 
                 _yaw = 0f;
@@ -186,7 +258,7 @@ namespace SailwindPlayerModel
                 // Solve the distance that fits the subject in BOTH axes, then stand back a bit further so
                 // it is framed rather than filling the frame edge to edge.
                 float fovV = _camera.fieldOfView * Mathf.Deg2Rad;
-                float aspect = (float)TexWidth / TexHeight;
+                float aspect = _rt != null ? (float)_rt.width / _rt.height : (float)TexWidth / TexHeight;
                 float fovH = 2f * Mathf.Atan(Mathf.Tan(fovV * 0.5f) * aspect);
                 float distV = (height * 0.5f) / Mathf.Tan(fovV * 0.5f);
                 float distH = (width * 0.5f) / Mathf.Tan(fovH * 0.5f);
@@ -254,6 +326,7 @@ namespace SailwindPlayerModel
                     FrameSubject();
                 }
 
+                FitTexture();   // before the render, so a new texture is drawn into before OnGUI shows it
                 if (_camera != null && _rt != null) _camera.Render();
             }
         }

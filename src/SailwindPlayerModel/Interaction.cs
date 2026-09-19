@@ -13,7 +13,8 @@ namespace SailwindPlayerModel
         CarryBig,
         /// <summary>A mooring rope or its length adjuster: both hands on the rope, one ahead of the other.</summary>
         Rope,
-        /// <summary>The ship's wheel: both hands on its handles, hand over hand.</summary>
+        /// <summary>The ship's wheel: both hands on its handles, hand over hand. A tiller (the game's steering wheel on a
+        /// tiller arm, such as Shipyard Expansion's): one hand on its end.</summary>
         Helm,
         /// <summary>A rope winch (halyards, sheets, the anchor) or the bilge pump: both hands on the handles, turning with them.</summary>
         Crank,
@@ -30,6 +31,9 @@ namespace SailwindPlayerModel
         public static ConfigEntry<float> BlendSpeed { get; private set; }
         public static ConfigEntry<float> ReachFraction { get; private set; }
         public static ConfigEntry<float> StepInMaxMeters { get; private set; }
+        public static ConfigEntry<float> SeatedReach { get; private set; }
+        public static ConfigEntry<float> SeatedLeanDegrees { get; private set; }
+        public static ConfigEntry<float> SeatedTurnDegrees { get; private set; }
         public static ConfigEntry<bool> TurnToFace { get; private set; }
         public static ConfigEntry<float> ElbowDown { get; private set; }
         public static ConfigEntry<float> ElbowOut { get; private set; }
@@ -43,18 +47,27 @@ namespace SailwindPlayerModel
         public static void Bind(ConfigFile cfg)
         {
             Enabled = cfg.Bind(Section, "Enabled", true,
-                "Pose the body at the ship's wheel, winches, bilge pump and sail pushers, holding mooring ropes, and carrying items.");
+                "Pose the body at the ship's wheel, tillers, winches, bilge pump and sail pushers, holding mooring ropes, and carrying items.");
             BlendSpeed = cfg.Bind(Section, "BlendSpeed", 9f,
-                new ConfigDescription("How fast the arms move onto a control or item and back off it.",
+                new ConfigDescription("How fast the arms move onto a control or mooring rope and back off it, and how fast the body steps and turns to stand at a control. Carried items use 2. Held Tool BlendSpeed.",
                     new AcceptableValueRange<float>(1f, 30f)));
             ReachFraction = cfg.Bind(Section, "ReachFraction", 0.8f,
                 new ConfigDescription("Sail pushers: how much of the arm's length to use before the body steps closer. Lower keeps the elbows bent.",
                     new AcceptableValueRange<float>(0.4f, 1f)));
             StepInMaxMeters = cfg.Bind(Section, "StepInMaxMeters", 1.0f,
-                new ConfigDescription("Farthest the body moves to stand at a control, closer or farther, in meters. 0 turns this off.",
+                new ConfigDescription("Farthest the body moves to stand at a control, closer or farther, in meters. Standing at a tiller, the body can move farther to the side so the swinging tiller does not pass through it. 0 turns this off.",
                     new AcceptableValueRange<float>(0f, 2f)));
+            SeatedReach = cfg.Bind(Section, "SeatedReach", 0.95f,
+                new ConfigDescription("How much of your arm's reach counts as within reach while sitting. A wheel, winch or pump this close to the seat is worked sitting down; anything farther stands you up to it. The distance counted is to the farthest point your hands are carried to, so a wheel is measured with its handles hard over and a pump at the far side of its stroke.",
+                    new AcceptableValueRange<float>(0.6f, 1.1f)));
+            SeatedLeanDegrees = cfg.Bind(Section, "SeatedLeanDegrees", 25f,
+                new ConfigDescription("How far you lean off the seat toward a wheel or winch you are working, in degrees. Leaning also counts toward what you can reach, so 0 keeps the seat only where your arms reach sitting upright.",
+                    new AcceptableValueRange<float>(0f, 40f)));
+            SeatedTurnDegrees = cfg.Bind(Section, "SeatedTurnDegrees", 30f,
+                new ConfigDescription("How far your upper body turns on the seat toward a control off to one side, in degrees.",
+                    new AcceptableValueRange<float>(0f, 60f)));
             TurnToFace = cfg.Bind(Section, "TurnToFace", true,
-                "Turn the body to face the wheel, winch, pump or sail pusher being used.");
+                "Turn the body to face the wheel, winch, pump or sail pusher being used. Standing at a tiller, the body faces the way the tiller points.");
             ElbowDown = cfg.Bind(Section, "ElbowDown", 1.0f,
                 new ConfigDescription("Elbow direction: how strongly the elbows point down.",
                     new AcceptableValueRange<float>(-1f, 2f)));

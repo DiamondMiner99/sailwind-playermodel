@@ -17,6 +17,12 @@ namespace SailwindPlayerModel
     {
         public bool IsWheel;
         public bool IsPump;
+        // A tiller: the game's steering wheel put on a tiller arm by a mod (Shipyard Expansion's tiller option, and
+        // possibly others'). The wheel always turns on its local X, so a tiller is one whose X stands upright and swings
+        // the arm side to side. It is held at the end of the arm rather than round a rim.
+        public bool IsTiller;
+        public Vector3 TillerTipLocal, TillerGripLocal;
+        public string TillerSource;   // "mesh", "bounds" or "no mesh": where the tiller's end was measured from
         public float[] Angles;
         public float TipRadius;      // local units, outermost point of the handles
         public float RimRadius;      // local units, inner edge of the handle region
@@ -112,10 +118,113 @@ namespace SailwindPlayerModel
             {
                 spec = FromMesh(mesh, wheel, pump) ?? FromBounds(mesh, wheel, pump);
             }
+            Bounds tillerBounds = default(Bounds);
+            if (wheel && LooksLikeTiller(control, mesh)) tillerBounds = MeasureTiller(spec, control, mesh, Vector3.up);
             _cache[id] = spec;
-            Plugin.Log.LogInfo($"[Interaction] {(wheel ? "wheel" : pump ? "pump" : "winch")} '{control.name}' ({(mesh != null ? mesh.name : "no mesh")}): " +
-                $"{spec.Angles.Length} handle(s), tip {spec.TipRadius:F3}, depth {spec.HandleDepth:F3}, from {spec.Source}");
+            if (spec.IsTiller)
+            {
+                Vector3 g = spec.TillerGripLocal, t = spec.TillerTipLocal;
+                Plugin.Log.LogInfo($"[Interaction] tiller '{control.name}' ({(mesh != null ? mesh.name : "no mesh")}): " +
+                    $"held at ({g.x:F3}, {g.y:F3}, {g.z:F3}), end at ({t.x:F3}, {t.y:F3}, {t.z:F3}), from {spec.TillerSource}" +
+                    (spec.TillerSource == "bounds" ? $", bounds x {tillerBounds.min.x:F3} to {tillerBounds.max.x:F3}" : ""));
+            }
+            else
+                Plugin.Log.LogInfo($"[Interaction] {(wheel ? "wheel" : pump ? "pump" : "winch")} '{control.name}' ({(mesh != null ? mesh.name : "no mesh")}): " +
+                    $"{spec.Angles.Length} handle(s), tip {spec.TipRadius:F3}, depth {spec.HandleDepth:F3}, from {spec.Source}");
             return spec;
+        }
+
+        /// <summary>True for a steering control that is a tiller, not a wheel. Safe to call on anything.</summary>
+        public static bool IsTiller(Transform control)
+        {
+            if (control == null || control.GetComponent<GPButtonSteeringWheel>() == null) return false;
+            var spec = For(control);
+            return spec != null && spec.IsTiller;
+        }
+
+        /// <summary>
+        /// A steering wheel turning about an axis that stands roughly upright swings side to side, which is a tiller.
+        /// Named "tiller" counts too, for one built on a heeled or oddly turned parent.
+        /// </summary>
+        private static bool LooksLikeTiller(Transform control, Mesh mesh)
+        {
+            Vector3 axis = control.TransformPoint(Vector3.right) - control.position;
+            if (axis.sqrMagnitude > 1e-8f && Mathf.Abs(Vector3.Dot(axis.normalized, Vector3.up)) > 0.6f) return true;
+            return control.name.IndexOf("tiller", StringComparison.OrdinalIgnoreCase) >= 0
+                   || (mesh != null && mesh.name.IndexOf("tiller", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        /// <summary>
+        /// Where a tiller's arm ends, in the control's own units. Across the turning axis it is the point of the mesh
+        /// farthest from the pivot, held a little short of the very end. Along the axis (the arm's height) it is the
+        /// middle of the arm near its end when the mesh can be read. Otherwise it is a little under the face of the
+        /// bounds on the upward side: the bounds also take in the rudder stock below the pivot, so their middle sits
+        /// well under the arm. Returns the bounds, for the log.
+        /// </summary>
+        private static Bounds MeasureTiller(RotorSpec spec, Transform control, Mesh mesh, Vector3 up)
+        {
+            // From world points, like RotorGrip, so a mirrored transform keeps its sign.
+            Vector3 xw = control.TransformPoint(Vector3.right) - control.position;
+            float scale = Mathf.Max(xw.magnitude, 1e-3f);
+            float upSign = Vector3.Dot(xw, up) >= 0f ? 1f : -1f;
+
+            Vector3 tip = Vector3.zero;
+            string source = null;
+            if (mesh != null && mesh.isReadable)
+            {
+                try
+                {
+                    Vector3[] verts = mesh.vertices;
+                    float best = 0f;
+                    foreach (var v in verts)
+                    {
+                        float r = v.y * v.y + v.z * v.z;
+                        if (r > best) { best = r; tip = v; }
+                    }
+                    if (best > 1e-8f)
+                    {
+                        // The arm's height near its end: halfway between the lowest and highest vertex a little short
+                        // of the tip, in the tip's direction. Min and max, not a mean, so a densely modeled bevel
+                        // cannot pull it.
+                        float radius = Mathf.Sqrt(best);
+                        float uy = tip.y / radius, uz = tip.z / radius;
+                        float lo = float.MaxValue, hi = float.MinValue;
+                        foreach (var v in verts)
+                        {
+                            float r = Mathf.Sqrt(v.y * v.y + v.z * v.z);
+                            if (r < 0.75f * radius || r > 0.95f * radius) continue;
+                            if ((v.y * uy + v.z * uz) / r < 0.866f) continue;
+                            if (v.x < lo) lo = v.x;
+                            if (v.x > hi) hi = v.x;
+                        }
+                        tip = new Vector3(lo <= hi ? (lo + hi) * 0.5f : tip.x, uy * radius, uz * radius);
+                        source = "mesh";
+                    }
+                }
+                catch { source = null; }
+            }
+
+            Bounds b = mesh != null ? mesh.bounds : new Bounds(new Vector3(0f, 0f, 0.5f), new Vector3(0.1f, 0.1f, 1f));
+            if (source == null)
+            {
+                // The side of the bounds that reaches farthest out across the axis.
+                Vector3[] ends = { new Vector3(b.center.x, b.max.y, b.center.z), new Vector3(b.center.x, b.min.y, b.center.z),
+                                   new Vector3(b.center.x, b.center.y, b.max.z), new Vector3(b.center.x, b.center.y, b.min.z) };
+                float best = -1f;
+                foreach (var e in ends)
+                {
+                    float r = e.y * e.y + e.z * e.z;
+                    if (r > best) { best = r; tip = e; }
+                }
+                // Level with the arm: 3.5 cm under the upward face, about half an arm's thickness.
+                tip.x = (upSign > 0f ? b.max.x : b.min.x) - upSign * 0.035f / scale;
+                source = mesh != null ? "bounds" : "no mesh";
+            }
+            spec.IsTiller = true;
+            spec.TillerTipLocal = tip;
+            spec.TillerGripLocal = new Vector3(tip.x, tip.y * 0.85f, tip.z * 0.85f);
+            spec.TillerSource = source;
+            return b;
         }
 
         /// <summary>
@@ -213,6 +322,23 @@ namespace SailwindPlayerModel
         private const float RegripSeconds = 0.22f;
         private const float MidlineMargin = 8f;
 
+        /// <summary>
+        /// Where a rotor's handles are this frame, as seen by one body: the handle plane, which way it faces,
+        /// which way is up and right in it, and where each hand wants to be on it. Built once by
+        /// <see cref="BuildFrame"/> so the standing pose and the seated reach measurement read the same geometry
+        /// and cannot drift apart.
+        /// </summary>
+        private struct RotorFrame
+        {
+            public Vector3 Origin, Axis, Hub, Face, Up, Right;
+            public float Scale;
+            public float GripRadiusWorld;
+            public bool Continuous;   // the hands never let go: a pump or a small winch, turned all the way round
+            public bool SameHandle;   // both hands on one handle
+            public float IdealR, IdealL;   // degrees in the rotor plane, where each hand wants to be
+            public float GripR, GripL;     // local units, how far out along its handle each hand holds
+        }
+
         private Transform _control;
         private RotorSpec _spec;
         private int _handleR = -1, _handleL = -1;
@@ -252,46 +378,16 @@ namespace SailwindPlayerModel
                 _regripR = _regripL = 0f;
                 _logged = false;
             }
-            if (_spec == null || _spec.Angles == null || _spec.Angles.Length == 0) return false;
+            RotorFrame f;
+            if (!BuildFrame(control, _spec, bodyPos, out f)) return false;
 
-            // Axis and handle face from world POINTS, not TransformDirection, so a mirrored transform cannot
-            // put the player on the wrong side.
-            Vector3 origin = control.TransformPoint(Vector3.zero);
-            Vector3 axis = (control.TransformPoint(_spec.LocalAxis) - origin).normalized;
-            float scale = (control.TransformPoint(Vector3.up) - origin).magnitude;
-            Hub = control.TransformPoint(_spec.LocalPoint(0f, 0f, _spec.HandleDepth));
-            GripRadiusWorld = _spec.GripRadius * scale;
-
-            Vector3 toHandles = Hub - origin;
-            Vector3 face = toHandles.magnitude > 0.02f ? toHandles.normalized
-                         : axis * (Vector3.Dot(bodyPos - Hub, axis) >= 0f ? 1f : -1f);
+            Vector3 axis = f.Axis, face = f.Face, up = f.Up, right = f.Right;
+            Hub = f.Hub;
             FaceNormal = face;
-
-            // "Up" in the rotor plane. A winch lying flat (axis near vertical) has no up, so its near side is.
-            Vector3 up = Vector3.ProjectOnPlane(Vector3.up, axis);
-            if (up.sqrMagnitude < 0.06f) up = Vector3.ProjectOnPlane(bodyPos - Hub, axis);
-            if (up.sqrMagnitude < 1e-4f) up = control.TransformDirection(Vector3.up);
-            up.Normalize();
-            // "Right" is the right of a person facing the hub, laid into the rotor plane, so left and right
-            // follow where the player stands and not how the mesh was built.
-            Vector3 toHub = Hub - bodyPos; toHub.y = 0f;
-            Vector3 personRight = toHub.sqrMagnitude > 1e-4f ? Vector3.Cross(Vector3.up, toHub.normalized) : Vector3.Cross(up, -face);
-            Vector3 right = Vector3.ProjectOnPlane(Vector3.ProjectOnPlane(personRight, axis), up);
-            if (right.sqrMagnitude < 0.04f) right = Vector3.Cross(up, -face);
-            right.Normalize();
-
-            int n = _spec.Angles.Length;
-            float arc = n > 1 ? 2f * Mathf.PI * GripRadiusWorld / n : 99f;
-            _continuous = !_spec.IsWheel && (_spec.IsPump || GripRadiusWorld <= 0.45f);
-            _sameHandle = n == 1 || _continuous || arc > 0.7f;
-
-            float idealR, idealL;
-            if (_sameHandle) { idealR = idealL = _continuous ? InteractionTuning.CrankHandAngle.Value : 80f; }
-            else
-            {
-                float a = _spec.IsWheel ? InteractionTuning.HelmHandAngle.Value : InteractionTuning.CrankHandAngle.Value;
-                idealR = a; idealL = -a;
-            }
+            GripRadiusWorld = f.GripRadiusWorld;
+            _continuous = f.Continuous;
+            _sameHandle = f.SameHandle;
+            float idealR = f.IdealR, idealL = f.IdealL;
 
             if (_handleR < 0)
             {
@@ -326,9 +422,8 @@ namespace SailwindPlayerModel
                 }
             }
 
-            float gripR = _spec.GripRadius;
-            // Two hands on one handle sit one beside the other along it, the outer hand at the grip.
-            float gripL = _sameHandle ? Mathf.Max(_spec.RimRadius * 0.9f, gripR - 0.11f / Mathf.Max(scale, 1e-3f)) : gripR;
+            float gripR = f.GripR;
+            float gripL = f.GripL;
             Vector3 targetR = control.TransformPoint(_spec.LocalPoint(_spec.Angles[_handleR], gripR, _spec.HandleDepth));
             Vector3 targetL = control.TransformPoint(_spec.LocalPoint(_spec.Angles[_handleL], gripL, _spec.HandleDepth));
 
@@ -368,6 +463,148 @@ namespace SailwindPlayerModel
                     $"{(_continuous ? "crank, one handle" : _sameHandle ? "hand over hand on one bar" : "hand over hand")}");
             }
             return true;
+        }
+
+        /// <summary>
+        /// The rotor's frame as seen from <paramref name="bodyPos"/>. False for anything with no handles to hold.
+        /// </summary>
+        private static bool BuildFrame(Transform control, RotorSpec spec, Vector3 bodyPos, out RotorFrame f)
+        {
+            f = default(RotorFrame);
+            if (control == null || spec == null || spec.Angles == null || spec.Angles.Length == 0) return false;
+
+            // Axis and handle face from world POINTS, not TransformDirection, so a mirrored transform cannot
+            // put the player on the wrong side.
+            f.Origin = control.TransformPoint(Vector3.zero);
+            f.Axis = (control.TransformPoint(spec.LocalAxis) - f.Origin).normalized;
+            f.Scale = (control.TransformPoint(Vector3.up) - f.Origin).magnitude;
+            f.Hub = control.TransformPoint(spec.LocalPoint(0f, 0f, spec.HandleDepth));
+            f.GripRadiusWorld = spec.GripRadius * f.Scale;
+
+            Vector3 toHandles = f.Hub - f.Origin;
+            f.Face = toHandles.magnitude > 0.02f ? toHandles.normalized
+                   : f.Axis * (Vector3.Dot(bodyPos - f.Hub, f.Axis) >= 0f ? 1f : -1f);
+
+            // "Up" in the rotor plane. A winch lying flat (axis near vertical) has no up, so its near side is.
+            Vector3 up = Vector3.ProjectOnPlane(Vector3.up, f.Axis);
+            if (up.sqrMagnitude < 0.06f) up = Vector3.ProjectOnPlane(bodyPos - f.Hub, f.Axis);
+            if (up.sqrMagnitude < 1e-4f) up = control.TransformDirection(Vector3.up);
+            up.Normalize();
+            f.Up = up;
+            // "Right" is the right of a person facing the hub, laid into the rotor plane, so left and right
+            // follow where the player stands and not how the mesh was built.
+            Vector3 toHub = f.Hub - bodyPos; toHub.y = 0f;
+            Vector3 personRight = toHub.sqrMagnitude > 1e-4f ? Vector3.Cross(Vector3.up, toHub.normalized) : Vector3.Cross(up, -f.Face);
+            Vector3 right = Vector3.ProjectOnPlane(Vector3.ProjectOnPlane(personRight, f.Axis), up);
+            if (right.sqrMagnitude < 0.04f) right = Vector3.Cross(up, -f.Face);
+            right.Normalize();
+            f.Right = right;
+
+            int n = spec.Angles.Length;
+            float arc = n > 1 ? 2f * Mathf.PI * f.GripRadiusWorld / n : 99f;
+            f.Continuous = !spec.IsWheel && (spec.IsPump || f.GripRadiusWorld <= 0.45f);
+            f.SameHandle = n == 1 || f.Continuous || arc > 0.7f;
+
+            if (f.SameHandle)
+            {
+                f.IdealR = f.IdealL = f.Continuous ? InteractionTuning.CrankHandAngle.Value : 80f;
+            }
+            else
+            {
+                float a = spec.IsWheel ? InteractionTuning.HelmHandAngle.Value : InteractionTuning.CrankHandAngle.Value;
+                f.IdealR = a; f.IdealL = -a;
+            }
+
+            f.GripR = spec.GripRadius;
+            // Two hands on one handle sit one beside the other along it, the outer hand at the grip.
+            f.GripL = f.SameHandle ? Mathf.Max(spec.RimRadius * 0.9f, f.GripR - 0.11f / Mathf.Max(f.Scale, 1e-3f)) : f.GripR;
+            return true;
+        }
+
+        /// <summary>
+        /// How far a seated body would have to reach to work this control, and the point between its two hands.
+        /// <paramref name="need"/> is the larger of the two hands' distances from its own shoulder to the farthest
+        /// point on the handles that hand is carried to before it lets go, so a wheel put hard over and a pump
+        /// turned all the way round are measured where the arms are longest; <paramref name="aim"/> is the midpoint
+        /// of the two, for the lean and the behind-the-seat test. Measured through the same frame the standing pose
+        /// is built from, so the two can never disagree. False for a tiller and for anything with no handles to hold.
+        /// </summary>
+        public static bool MeasureSeated(Transform control, Vector3 shoulderMid, Vector3 shoulderRight, float shoulderHalf,
+            out float need, out Vector3 aim)
+        {
+            need = 0f;
+            aim = shoulderMid;
+            if (control == null) return false;
+            var spec = RotorSpecs.For(control);
+            if (spec == null || spec.IsTiller) return false;
+            RotorFrame f;
+            if (!BuildFrame(control, spec, shoulderMid, out f)) return false;
+
+            Vector3 handR = shoulderMid + shoulderRight * shoulderHalf;
+            Vector3 handL = shoulderMid - shoulderRight * shoulderHalf;
+            Vector3 wantR, wantL;
+            if (f.Continuous)
+            {
+                // The hands never let go of a pump or a small winch, so each one really does visit the far side of
+                // its own sweep circle every stroke. Measure to there, not to where it first takes hold.
+                wantR = FarthestOnSweep(f, f.GripR * f.Scale, handR);
+                wantL = FarthestOnSweep(f, f.GripL * f.Scale, handL);
+            }
+            else
+            {
+                // A hand keeps its handle until it has turned HelmReleaseArc past where it wants to be, or out of
+                // its own half of the rim, so a wheel put hard over carries it well away from the angle it took
+                // hold at. Measure to the farthest that carries it, not to where it first takes hold.
+                float release = InteractionTuning.HelmReleaseArc.Value;
+                float loR, hiR, loL, hiL;
+                HandArc(f.IdealR, release, f.SameHandle ? 0 : 1, out loR, out hiR);
+                HandArc(f.IdealL, release, f.SameHandle ? 0 : -1, out loL, out hiL);
+                wantR = FarthestOnArc(f, f.GripR * f.Scale, handR, loR, hiR);
+                wantL = FarthestOnArc(f, f.GripL * f.Scale, handL, loL, hiL);
+            }
+            need = Mathf.Max(Vector3.Distance(handR, wantR), Vector3.Distance(handL, wantL));
+            aim = (wantR + wantL) * 0.5f;
+            return true;
+        }
+
+        /// <summary>
+        /// How far round its handle can carry one hand before it lets go: the release arc either side of where the
+        /// hand wants to be, kept inside that hand's half of the rim (side 1 right, -1 left, 0 either).
+        /// </summary>
+        private static void HandArc(float ideal, float release, int side, out float lo, out float hi)
+        {
+            lo = ideal - release;
+            hi = ideal + release;
+            if (side > 0) { lo = Mathf.Max(lo, MidlineMargin); hi = Mathf.Min(hi, 180f - MidlineMargin); }
+            else if (side < 0) { lo = Mathf.Max(lo, -180f + MidlineMargin); hi = Mathf.Min(hi, -MidlineMargin); }
+        }
+
+        /// <summary>
+        /// The point between <paramref name="lo"/> and <paramref name="hi"/> degrees on a sweep circle of the given
+        /// world radius that is farthest from <paramref name="from"/>. The distance to a circle climbs steadily to
+        /// either side of the near point, so the farthest is at one end of the arc, or at the far point of the whole
+        /// circle when that falls inside it.
+        /// </summary>
+        private static Vector3 FarthestOnArc(RotorFrame f, float radius, Vector3 from, float lo, float hi)
+        {
+            Vector3 best = f.Hub + Rim(f.Up, f.Right, radius, lo);
+            Vector3 end = f.Hub + Rim(f.Up, f.Right, radius, hi);
+            if ((end - from).sqrMagnitude > (best - from).sqrMagnitude) best = end;
+            Vector3 far = FarthestOnSweep(f, radius, from);
+            Vector3 d = far - f.Hub;
+            float ang = Mathf.Atan2(Vector3.Dot(d, f.Right), Vector3.Dot(d, f.Up)) * Mathf.Rad2Deg;
+            // The arc can run past a half turn, so ask how far into it that angle lies rather than comparing signs.
+            if (Mathf.Repeat(ang - lo, 360f) <= hi - lo && (far - from).sqrMagnitude > (best - from).sqrMagnitude) best = far;
+            return best;
+        }
+
+        /// <summary>The point of a sweep circle of the given world radius that is farthest from <paramref name="from"/>.</summary>
+        private static Vector3 FarthestOnSweep(RotorFrame f, float radius, Vector3 from)
+        {
+            Vector3 d = from - f.Hub;
+            Vector3 inPlane = Vector3.Dot(d, f.Up) * f.Up + Vector3.Dot(d, f.Right) * f.Right;
+            if (inPlane.sqrMagnitude < 1e-6f) return f.Hub + f.Up * radius;
+            return f.Hub - inPlane.normalized * radius;
         }
 
         private static bool InZone(float angle, int side)
@@ -432,6 +669,184 @@ namespace SailwindPlayerModel
         {
             float a = degrees * Mathf.Deg2Rad;
             return radius * (Mathf.Cos(a) * up + Mathf.Sin(a) * right);
+        }
+    }
+
+    /// <summary>
+    /// One hand on a tiller, for one body.
+    ///
+    /// The hand is picked when the tiller is taken, from the side the body is on, and changes only if the body ends
+    /// up well over on the other side. Standing, the body stays where it is beside the end, moving only as far as it
+    /// must when the swinging arm would reach its hips or the end would leave its reach; <see cref="Forward"/> is the
+    /// way the tiller points, for the body to face. Seated, the seat places the body and only the hand is decided here.
+    ///
+    /// Where the body stands is measured from where the end rests with the rudder amidships, which is fixed to the
+    /// boat, so steering does not drag the body about with the end.
+    /// </summary>
+    internal sealed class TillerGrip
+    {
+        private const float HipClear = 0.22f;         // meters across from the arm (pivot to tip) to the body's centerline
+        private const float HipDepth = 0.10f;         // meters from the body's centerline to its front and back, where the arm is measured
+        private const float ReachSlack = 0.08f;       // meters past the arm's flat reach before the body follows
+        private const float ForeBack = 0.30f;         // how far behind the end the body may stand
+        private const float ForeAhead = 0.10f;        // how far ahead of it
+        private const float BackSwungAway = 0.03f;    // how far behind the end once the tiller has swung away from the body
+        private const float SwungAwayBlend = 0.30f;   // meters of swing away from the body over which ForeBack narrows to that
+        private const float LatchStanding = 0.25f;    // meters over on the other side before the hand changes
+        private const float LatchSeated = 0.12f;
+        private const float PickDeadband = 0.02f;
+        private const float SettleSeconds = 0.4f;     // a crewmate's position is still catching up: re-pick until then
+
+        private Transform _control;
+        private RotorSpec _spec;
+        private int _side;            // 0 unset; -1 the right hand (standing on the tiller's -Right side); 1 the left hand
+        private bool _seated;
+        private float _held;
+        private float _bx, _by;       // where the body stands: across from the rest point (toward its side) and along Forward
+        private bool _logged;
+        private Vector3 _restGrip;
+        // The arm in the rest frame, like _bx and _by: along and across (toward the body's side) at the pivot and the tip,
+        // and the farther across of the grip and the tip. Set by the standing update.
+        private float _pivotF, _pivotX, _tipF, _tipX, _endSide;
+
+        // Per-frame results.
+        public Vector3 Grip, Tip, Along, Forward, Right, StandPoint, FingerHint;
+        public float MinSide;
+
+        public bool RightHand { get { return _side <= 0; } }
+        public bool Active { get { return _control != null && _spec != null && _spec.IsTiller; } }
+        /// <summary>From the tiller toward the side the body stands on.</summary>
+        public Vector3 AwaySide { get { return Right * _side; } }
+
+        /// <summary>How far <paramref name="p"/> would have to move away from the tiller to clear the swinging arm.</summary>
+        public float ClearanceGap(Vector3 p)
+        {
+            float f = Vector3.Dot(p - _restGrip, Forward);
+            return Mathf.Max(_endSide, ArmSide(f)) + HipClear - Vector3.Dot(p - _restGrip, Right) * _side;
+        }
+
+        /// <summary>
+        /// How far across toward the body's side the arm reaches beside a body centered <paramref name="f"/> meters along
+        /// the rest line, from its back to its front. Swung away from the body, the arm runs back from the end toward the
+        /// body's side, so beside a body standing behind the end it is nearer than the end is.
+        /// </summary>
+        private float ArmSide(float f)
+        {
+            // Along the arm the across position only ever changes one way, so the nearest is at the back or the front.
+            return Mathf.Max(ArmAcross(f - HipDepth), ArmAcross(f + HipDepth));
+        }
+
+        private float ArmAcross(float f)
+        {
+            float span = _tipF - _pivotF;
+            if (Mathf.Abs(span) < 1e-3f) return Mathf.Max(_pivotX, _tipX);
+            return Mathf.Lerp(_pivotX, _tipX, (f - _pivotF) / span);   // clamped: the pivot's or the tip's beyond either end
+        }
+
+        public void Release()
+        {
+            _control = null;
+            _spec = null;
+            _side = 0;
+            _held = 0f;
+            _logged = false;
+        }
+
+        /// <summary>
+        /// Update the hold. False for anything that is not a tiller. <paramref name="bodyPos"/> is the player's own
+        /// position, never the moved body; <paramref name="seatHips"/> and <paramref name="seatRight"/> are read only
+        /// while <paramref name="seated"/>; <paramref name="shoulderY"/> is the world height of the shoulders.
+        /// </summary>
+        public bool Update(Transform control, float dt, Vector3 bodyPos, bool seated, Vector3 seatHips, Vector3 seatRight,
+            float armLength, float shoulderY, float shoulderHalf)
+        {
+            if (control == null) { Release(); return false; }
+            if (control != _control)
+            {
+                _control = control;
+                _spec = RotorSpecs.For(control);
+                _side = 0;
+                _held = 0f;
+                _logged = false;
+            }
+            // Every frame, so a wheel held after a tiller never reports a tiller.
+            if (_spec == null || !_spec.IsTiller) return false;
+            if (seated != _seated) { _seated = seated; _side = 0; _held = 0f; _logged = false; }
+            _held += dt;
+
+            Vector3 pivot = control.position;
+            Grip = control.TransformPoint(_spec.TillerGripLocal);
+            Tip = control.TransformPoint(_spec.TillerTipLocal);
+            Along = (Tip - Grip).sqrMagnitude > 1e-6f ? (Tip - Grip).normalized : (Tip - pivot).normalized;
+
+            // The end at rest. The game turns the control only through localEulerAngles = (angle, 0, 0)
+            // (GPButtonSteeringWheel.ApplyWheelRotationFromRudder), so amidships is its local rotation at identity.
+            _restGrip = control.parent != null
+                ? control.parent.TransformPoint(control.localPosition + Vector3.Scale(control.localScale, _spec.TillerGripLocal))
+                : Grip;
+            Forward = _restGrip - pivot;
+            Forward.y = 0f;
+            if (Forward.sqrMagnitude < 1e-6f) { Forward = Along; Forward.y = 0f; }
+            if (Forward.sqrMagnitude < 1e-6f) Forward = Vector3.forward;
+            Forward.Normalize();
+            Right = Vector3.Cross(Vector3.up, Forward);
+
+            // Which side, and so which hand. Seated, from where the seat is; standing, from where the player is.
+            float d = seated ? -Vector3.Dot(_restGrip - seatHips, seatRight) : Vector3.Dot(bodyPos - _restGrip, Right);
+            bool settling = _held < SettleSeconds;
+            bool seed = false;
+            if (_side == 0 || settling)
+            {
+                _side = d > PickDeadband ? 1 : d < -PickDeadband ? -1 : (_side != 0 ? _side : -1);
+                seed = true;
+            }
+            else if (d * _side < -(seated ? LatchSeated : LatchStanding))
+            {
+                _side = -_side;
+                seed = true;
+            }
+            // Across the bar, away from the body.
+            FingerHint = seated ? (RightHand ? seatRight : -seatRight) : -Right * _side;
+
+            float dy = shoulderY - Grip.y;
+            float reachSq = 0.97f * armLength * 0.97f * armLength;
+            float flat = Mathf.Sqrt(Mathf.Max(reachSq - dy * dy, 0f));
+            float rho = flat + ReachSlack;
+
+            if (!seated)
+            {
+                float gx = Vector3.Dot(Grip - _restGrip, Right) * _side;
+                float tx = Vector3.Dot(Tip - _restGrip, Right) * _side;
+                float gy = Vector3.Dot(Grip - _restGrip, Forward);
+                _pivotF = Vector3.Dot(pivot - _restGrip, Forward);
+                _pivotX = Vector3.Dot(pivot - _restGrip, Right) * _side;
+                _tipF = Vector3.Dot(Tip - _restGrip, Forward);
+                _tipX = tx;
+                _endSide = Mathf.Max(gx, tx);
+                if (seed)
+                {
+                    _bx = Vector3.Dot(bodyPos - _restGrip, Right) * _side;
+                    _by = Vector3.Dot(bodyPos - _restGrip, Forward);
+                }
+                // Stay put while the end is in reach and the arm clear of the hips; otherwise move only as far as needed.
+                // Swung away, the arm runs back from the end toward the body, so the body stops standing behind the end:
+                // stepping out past the arm there would leave the end out of reach.
+                float back = Mathf.Min(ForeBack, rho);
+                back = Mathf.Lerp(back, Mathf.Min(back, BackSwungAway), -gx / SwungAwayBlend);
+                _by = Mathf.Clamp(_by, gy - back, gy + Mathf.Min(ForeAhead, rho));
+                MinSide = Mathf.Max(_endSide, ArmSide(_by)) + HipClear;
+                float maxSide = gx + shoulderHalf + Mathf.Sqrt(Mathf.Max(rho * rho - (_by - gy) * (_by - gy), 0f));
+                _bx = Mathf.Clamp(_bx, MinSide, Mathf.Max(MinSide, maxSide));   // clearance wins over reach
+                StandPoint = _restGrip + Right * (_side * _bx) + Forward * _by;
+            }
+
+            if (!_logged && !settling)
+            {
+                _logged = true;
+                Plugin.Log.LogInfo($"[Interaction] holding tiller '{control.name}' with the {(RightHand ? "right" : "left")} hand" +
+                    (seated ? " from a seat" : $": end {dy:F2} m below the shoulders, flat reach {flat:F2} m, standing {_bx:F2} m beside it"));
+            }
+            return true;
         }
     }
 }
