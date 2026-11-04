@@ -607,10 +607,6 @@ namespace SailwindPlayerModel
         {
             var s = _seat;
             if (s == null) return false;
-            // A body on the deck is not at a station: the floor poses hold it up on its hands or wrap the arms
-            // round the knees, so they stand up to a control as before.
-            if (s.Pose == SeatPose.FloorLegsOut || s.Pose == SeatPose.FloorCrossLegged
-                || s.Pose == SeatPose.FloorKneeUp || s.Pose == SeatPose.FloorKneesHugged) return false;
 
             float need, limit, offFacing;
             if (!MeasureSeatedReach(control, out need, out limit, out offFacing))
@@ -644,17 +640,17 @@ namespace SailwindPlayerModel
         }
 
         /// <summary>
-        /// Turn a ledge seat toward a control behind it: the legs swing over to the far side if there is one, as the sit
-        /// key does, and otherwise the body turns on the spot to the nearest facing the control can be worked from. The view
-        /// stays where it is, because the player is already looking at what they just took hold of. Chairs and spars stay
-        /// as they are: they have one way to face. True if the seat moved.
+        /// Turn a ledge or floor seat toward a control behind it: on a ledge the legs swing over to the far side if there is
+        /// one, as the sit key does, and otherwise the body turns on the spot to the nearest facing the control can be
+        /// worked from. The view stays where it is, because the player is already looking at what they just took hold of.
+        /// Chairs and spars stay as they are: they have one way to face. True if the seat moved.
         /// </summary>
         private bool TurnSeatToward(Transform control)
         {
             var s = _seat;
-            if (s == null || !s.Edge || s.Spar || s.Floor) return false;
+            if (s == null || (!s.Edge && !s.Floor) || s.Spar) return false;
             float need, limit, offFacing;
-            bool swung = TrySwingLegs(false);
+            bool swung = s.Edge && TrySwingLegs(false);
             if (swung)
             {
                 Plugin.Log.LogInfo($"[Seating] swung round to face {ControlName(control)}");

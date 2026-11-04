@@ -39,10 +39,9 @@ other mods can add buttons to.
   anchor winch and the bilge pump are worked from the seat when their handles are within reach of where you
   sit, whether you hold them with a click or with the game's steer with mouse and winches with mouse
   settings: your body turns and leans toward them and you keep the seat. The wheel takes one hand and the other
-  rests on your thigh (SeatedWheelOneHand off puts both on it). On a ledge, taking hold of one of these behind
-  you swings your legs round to it, or turns you on the spot where there is no far side. Handles
-  farther off stand you up to them, and so does a sail pusher, which you push while walking along, and any of
-  them while you sit on the floor. If the boat heels or the crate you
+  rests on your thigh (SeatedWheelOneHand off puts both on it). On a ledge or the floor, taking hold of one of
+  these behind you turns you to it. Handles
+  farther off stand you up to them, and so does a sail pusher, which you push while walking along. If the boat heels or the crate you
   sit on slides far enough to carry one of those four out of reach while you work it, you stand up to it. A
   Shipyard Expansion tiller and another mod's control, such as HMS Leopard's oars or the Realistic Skies
   telescope, are worked from a seat with no reach test, so sit within arm's reach of one or your hands will

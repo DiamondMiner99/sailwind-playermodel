@@ -377,8 +377,9 @@ namespace SailwindPlayerModel
         private bool _regripFromHands;
 
         // How far a handle carries the one hand before it takes the next. Tighter than HelmReleaseArc: two hands share
-        // the wheel's far side between them, and one hand has to stay near the side it can reach.
-        private const float OneHandArcDeg = 45f;
+        // the wheel's far side between them, and one hand has to stay near the side it can reach. Past half the spacing
+        // of the 6 and 8 handle stock wheels, so there is always a nearer handle to go to.
+        private const float OneHandArcDeg = 30f;
         // Where the one hand wants to be: the part of the rim nearest its shoulder, pulled down and out to where a
         // resting hand holds a wheel. Without this, a seat square behind the hub leaves the nearest point undefined.
         private const float OneHandDrop = 0.25f, OneHandOut = 0.25f;

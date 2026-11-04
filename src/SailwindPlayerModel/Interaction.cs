@@ -58,14 +58,16 @@ namespace SailwindPlayerModel
             StepInMaxMeters = cfg.Bind(Section, "StepInMaxMeters", 1.0f,
                 new ConfigDescription("Farthest the body moves to stand at a control, closer or farther, in meters. Standing at a tiller, the body can move farther to the side so the swinging tiller does not pass through it. 0 turns this off.",
                     new AcceptableValueRange<float>(0f, 2f)));
-            SeatedReach = cfg.Bind(Section, "SeatedReach", 0.95f,
+            // Named apart from the old SeatedReach and SeatedLeanDegrees entries, whose saved 0.95 and 25 stood players up
+            // from seats that could reach a control. A saved value outlives a new default, so everyone takes the new ones.
+            SeatedReach = cfg.Bind(Section, "SeatedArmReach", 1f,
                 new ConfigDescription("How much of your arm's reach counts as within reach while sitting. A wheel, winch or pump this close to the seat is worked sitting down; anything farther stands you up to it. The distance counted is to the farthest point your hands are carried to, so a wheel is measured with its handle at the end of the hand's swing and a pump at the far side of its stroke.",
                     new AcceptableValueRange<float>(0.6f, 1.1f)));
             SeatedWheelOneHand = cfg.Bind(Section, "SeatedWheelOneHand", true,
                 "Sitting at the ship's wheel, steer with whichever hand has the shorter reach and keep the other on your thigh, which works from farther away. Off, both hands go on the wheel as they do standing, and the seat has to be close enough for both.");
-            SeatedLeanDegrees = cfg.Bind(Section, "SeatedLeanDegrees", 25f,
+            SeatedLeanDegrees = cfg.Bind(Section, "SeatedLeanMax", 40f,
                 new ConfigDescription("How far you lean off the seat toward a wheel or winch you are working, in degrees. Leaning also counts toward what you can reach, so 0 keeps the seat only where your arms reach sitting upright.",
-                    new AcceptableValueRange<float>(0f, 40f)));
+                    new AcceptableValueRange<float>(0f, 60f)));
             SeatedTurnDegrees = cfg.Bind(Section, "SeatedTurnDegrees", 30f,
                 new ConfigDescription("How far your upper body turns on the seat toward a control off to one side, in degrees.",
                     new AcceptableValueRange<float>(0f, 60f)));
