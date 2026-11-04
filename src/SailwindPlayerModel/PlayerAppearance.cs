@@ -53,16 +53,26 @@ namespace SailwindPlayerModel
             /// no hat is a person); FALSE for anatomy, where it deletes the body part and leaves a floating
             /// head or an invisible character.</summary>
             public readonly bool AllowsNone;
+            /// <summary>The other side of a left and right pair (shoulders, elbows, knees, gloves), or null. Both sides
+            /// wear the same choice, each wrapped into its own list.</summary>
+            public readonly Func<CharacterCustomizer, List<GameObject>> PairList;
+            public readonly Action<CharacterCustomizer, int> PairSet;
+            /// <summary>0 is "match the torso" instead of "wear nothing": for limbs, where nothing would leave a stump.</summary>
+            public readonly bool MatchesTorso;
             public Slot(string key, string label, Func<CharacterCustomizer, int> get,
                 Action<CharacterCustomizer, int> set, Func<CharacterCustomizer, List<GameObject>> list,
-                bool allowsNone)
-            { Key = key; Label = label; Get = get; Set = set; List = list; AllowsNone = allowsNone; }
+                bool allowsNone, Func<CharacterCustomizer, List<GameObject>> pairList = null,
+                Action<CharacterCustomizer, int> pairSet = null, bool matchesTorso = false)
+            {
+                Key = key; Label = label; Get = get; Set = set; List = list; AllowsNone = allowsNone;
+                PairList = pairList; PairSet = pairSet; MatchesTorso = matchesTorso;
+            }
         }
 
-        // Tier 1 slot set: the groups that visibly change WHO the character is, in the order a player would
-        // reasonably work down a character screen. The remaining vanilla fields (per-limb arms/hands, the
-        // attachment points) are deliberately left on whatever the source shopkeeper had - they are mostly
-        // armour hardpoints, and exposing 44 sliders would bury the ones that matter.
+        // The first nine are the groups that visibly change WHO the character is. The ones after them (head
+        // coverings, armor and kit, gloves) were added later and are APPENDED, never inserted: co-op sends the
+        // values positionally, so a slot's index is as fixed as its key. The screen shows them in its own order
+        // (CharacterScreen.DisplayOrder). Sleeves, elf ears, chest kit and the head attachment folders stay pinned.
         //
         // Male and female variants of the same concept share ONE slot: which underlying field is written
         // depends on the Gender slot, so a player switching gender keeps a coherent outfit instead of
@@ -114,7 +124,61 @@ namespace SailwindPlayerModel
                     else { c.maleLeg_Right = v; c.maleLeg_Left = v; }
                 },
                 c => Group(c).leg_Right, allowsNone: false),
+            // A hood, coif, pelt or helmet: the head coverings made to be worn without hair. Apply hides the hair
+            // and the hat while one is on and keeps both choices.
+            new Slot("hood", "Hood",
+                c => c.allGenderHeadCoverings_No_Hair,
+                (c, v) => c.allGenderHeadCoverings_No_Hair = v,
+                c => c.allGender != null ? c.allGender.headCoverings_No_Hair : null, allowsNone: true),
+            // Coverings made to be worn without facial hair; the beard is hidden under one (FaceCoverHidesBeard).
+            new Slot("face", "Face cover",
+                c => c.allGenderHeadCoverings_No_FacialHair,
+                (c, v) => c.allGenderHeadCoverings_No_FacialHair = v,
+                c => c.allGender != null ? c.allGender.headCoverings_No_FacialHair : null, allowsNone: true),
+            new Slot("back", "Back",
+                c => c.allGenderBack_Attachment,
+                (c, v) => c.allGenderBack_Attachment = v,
+                c => c.allGender != null ? c.allGender.back_Attachment : null, allowsNone: true),
+            new Slot("shoulders", "Shoulders",
+                c => c.allGenderShoulder_Attachment_Right,
+                (c, v) => c.allGenderShoulder_Attachment_Right = v,
+                c => c.allGender != null ? c.allGender.shoulder_Attachment_Right : null, allowsNone: true,
+                pairList: c => c.allGender != null ? c.allGender.shoulder_Attachment_Left : null,
+                pairSet: (c, v) => c.allGenderShoulder_Attachment_Left = v),
+            new Slot("elbows", "Elbows",
+                c => c.allGenderElbow_Attachment_Right,
+                (c, v) => c.allGenderElbow_Attachment_Right = v,
+                c => c.allGender != null ? c.allGender.elbow_Attachment_Right : null, allowsNone: true,
+                pairList: c => c.allGender != null ? c.allGender.elbow_Attachment_Left : null,
+                pairSet: (c, v) => c.allGenderElbow_Attachment_Left = v),
+            new Slot("knees", "Knees",
+                c => c.allGenderKnee_Attachement_Right,
+                (c, v) => c.allGenderKnee_Attachement_Right = v,
+                c => c.allGender != null ? c.allGender.knee_Attachement_Right : null, allowsNone: true,
+                pairList: c => c.allGender != null ? c.allGender.knee_Attachement_Left : null,
+                pairSet: (c, v) => c.allGenderKnee_Attachement_Left = v),
+            new Slot("belt", "Belt",
+                c => c.allGenderHips_Attachment,
+                (c, v) => c.allGenderHips_Attachment = v,
+                c => c.allGender != null ? c.allGender.hips_Attachment : null, allowsNone: true),
+            // Hands are a limb: vanilla indexes them unguarded, so there is no "nothing". 0 keeps them matched to
+            // the torso, which is how every look saved before this row existed was drawn.
+            new Slot("gloves", "Gloves",
+                c => c.isFemale ? c.femaleHand_Right : c.maleHand_Right,
+                (c, v) => { if (c.isFemale) c.femaleHand_Right = v; else c.maleHand_Right = v; },
+                c => Group(c).hand_Right, allowsNone: true,
+                pairList: c => Group(c).hand_Left,
+                pairSet: (c, v) => { if (c.isFemale) c.femaleHand_Left = v; else c.maleHand_Left = v; },
+                matchesTorso: true),
         };
+
+        /// <summary>
+        /// How many slots shipped before the head covering, gear and glove rows. A look nobody saved seeds only these,
+        /// so the added rows start empty (and the gloves matched to the torso) instead of putting a helmet and armor
+        /// on every crewmate who never opened the screen.
+        /// </summary>
+        public const int CoreSlotCount = 9;
+
 
         /// <summary>The male or female part-list bundle, whichever this customizer is currently set to.
         /// Never null - an empty stand-in keeps the slot table free of null checks, and a slot whose list
@@ -349,23 +413,14 @@ namespace SailwindPlayerModel
         /// hand to -1 deletes it and leaves a character with stumps - so those follow the TORSO choice,
         /// which is also how Synty rigs keep sleeve and glove styling continuous with the jacket.
         /// </summary>
-        private void PinUnexposedGroups(CharacterCustomizer c)
+        private void PinUnexposedGroups(CharacterCustomizer c, bool rightHandPicked, bool leftHandPicked)
         {
             var g = Group(c);
 
-            // Accessories: nothing.
+            // Accessories no row offers: nothing. The head coverings, back, shoulders, elbows, knees and belt
+            // have rows of their own now and were written by Apply.
             c.allGenderAll_Head_Attachment = -1;          // the folder group - never valid to select
-            c.allGenderHeadCoverings_No_FacialHair = -1;  // alternates for the hat slot we DO expose
-            c.allGenderHeadCoverings_No_Hair = -1;
-            c.allGenderChest_Attachment = -1;
-            c.allGenderBack_Attachment = -1;
-            c.allGenderShoulder_Attachment_Right = -1;
-            c.allGenderShoulder_Attachment_Left = -1;
-            c.allGenderElbow_Attachment_Right = -1;
-            c.allGenderElbow_Attachment_Left = -1;
-            c.allGenderHips_Attachment = -1;
-            c.allGenderKnee_Attachement_Right = -1;
-            c.allGenderKnee_Attachement_Left = -1;
+            c.allGenderChest_Attachment = -1;             // empty on every NPC this mod clones
             c.allGenderElf_Ear = -1;
 
             // The alternate head variant: we drive headAllElements, so this one must stand down or two
@@ -381,8 +436,9 @@ namespace SailwindPlayerModel
             SetLimb(c, g.arm_Upper_Left,  torso, v => { if (c.isFemale) c.femaleArm_Upper_Left  = v; else c.maleArm_Upper_Left  = v; });
             SetLimb(c, g.arm_Lower_Right, torso, v => { if (c.isFemale) c.femaleArm_Lower_Right = v; else c.maleArm_Lower_Right = v; });
             SetLimb(c, g.arm_Lower_Left,  torso, v => { if (c.isFemale) c.femaleArm_Lower_Left  = v; else c.maleArm_Lower_Left  = v; });
-            SetLimb(c, g.hand_Right,      torso, v => { if (c.isFemale) c.femaleHand_Right      = v; else c.maleHand_Right      = v; });
-            SetLimb(c, g.hand_Left,       torso, v => { if (c.isFemale) c.femaleHand_Left       = v; else c.maleHand_Left       = v; });
+            // Gloves picked on their own row were written by Apply; a hand it did not write goes with the torso.
+            if (!rightHandPicked) SetLimb(c, g.hand_Right, torso, v => { if (c.isFemale) c.femaleHand_Right = v; else c.maleHand_Right = v; });
+            if (!leftHandPicked)  SetLimb(c, g.hand_Left,  torso, v => { if (c.isFemale) c.femaleHand_Left  = v; else c.maleHand_Left  = v; });
         }
 
         /// <summary>
@@ -477,10 +533,22 @@ namespace SailwindPlayerModel
         /// </summary>
         private static int ToVanillaIndex(CharacterCustomizer c, int slotIndex, int value)
         {
-            if (value <= 0) return -1;
-            var list = Slots[slotIndex].List(c);
-            if (list == null) return -1;
-            int wanted = value;                    // 1-based among wearables
+            return NthWearable(Slots[slotIndex].List(c), value);
+        }
+
+        /// <summary>
+        /// The list index of the nth wearable entry (1-based), wrapped into how many the list holds; -1 for 0 or a list
+        /// with nothing wearable. Wrapping is what lets the two sides of a pair, whose lists need not be the same
+        /// length, wear one choice.
+        /// </summary>
+        private static int NthWearable(List<GameObject> list, int value)
+        {
+            if (value <= 0 || list == null) return -1;
+            int n = 0;
+            for (int i = 0; i < list.Count; i++)
+                if (IsWearable(list[i])) n++;
+            if (n == 0) return -1;
+            int wanted = (value - 1) % n + 1;
             for (int i = 0; i < list.Count; i++)
             {
                 if (!IsWearable(list[i])) continue;
@@ -511,6 +579,7 @@ namespace SailwindPlayerModel
                     wantFemale = false;
                 Slots[0].Set(c, wantFemale ? 2 : 1);
 
+                bool rightHand = false, leftHand = false;   // gloves written here rather than matched to the torso
                 for (int i = 1; i < Slots.Length; i++)
                 {
                     int count = VariantCount(c, i);
@@ -520,7 +589,12 @@ namespace SailwindPlayerModel
                     // source value alone is strictly safer than writing one that aborts the model.
                     if (count <= 0)
                     {
-                        if (Slots[i].AllowsNone) Slots[i].Set(c, -1);
+                        // A limb row has no "nothing"; the torso match in PinUnexposedGroups covers it.
+                        if (Slots[i].AllowsNone && !Slots[i].MatchesTorso)
+                        {
+                            Slots[i].Set(c, -1);
+                            if (Slots[i].PairSet != null) Slots[i].PairSet(c, -1);
+                        }
                         continue;
                     }
 
@@ -530,13 +604,36 @@ namespace SailwindPlayerModel
                     // to one value and made crews look near-identical - exactly what that look exists to
                     // prevent. Wrapping keeps the variation and is equally safe.
                     int v = NormalizeValue(i, count, this[i]);
-                    Slots[i].Set(c, ToVanillaIndex(c, i, v));
+                    if (Slots[i].MatchesTorso && v == 0) continue;   // PinUnexposedGroups matches it to the torso
+                    int main = ToVanillaIndex(c, i, v);
+                    // A limb is never given -1: that side is left to the torso match instead.
+                    if (main >= 0 || !Slots[i].MatchesTorso) Slots[i].Set(c, main);
+                    if (Slots[i].MatchesTorso && main >= 0) rightHand = true;
+                    if (Slots[i].PairSet != null)
+                    {
+                        // A pair side with nothing wearable goes to -1 where vanilla guards it, and to the torso
+                        // match on a limb.
+                        int pair = NthWearable(Slots[i].PairList(c), v);
+                        if (pair >= 0 || !Slots[i].MatchesTorso) Slots[i].PairSet(c, pair);
+                        if (Slots[i].MatchesTorso && pair >= 0) leftHand = true;
+                    }
                 }
+
+                // A hood is made to be worn without hair, so the hair and the hat come off under it. The saved
+                // choices stay; taking the hood off brings them back.
+                if (c.allGenderHeadCoverings_No_Hair >= 0)
+                {
+                    c.allGenderAll_Hair = -1;
+                    c.allGenderHeadCoverings_Base_Hair = -1;
+                }
+                // A face cover is made to be worn without facial hair. Vanilla draws the beard unguarded, so it
+                // cannot be switched off by index; FaceCoverHidesBeard hides it after the model is built.
+                SetHidesBeard(c, !c.isFemale && c.allGenderHeadCoverings_No_FacialHair >= 0);
 
                 // Pin every group we do NOT expose to "nothing". Without this they keep whatever the local
                 // machine's cloned shopkeeper happened to be wearing - so the same appearance string would
                 // render differently on every client, which defeats the point of syncing it at all.
-                PinUnexposedGroups(c);
+                PinUnexposedGroups(c, rightHand, leftHand);
 
                 // Last: make every index legal for THIS rig. Vanilla's UpdateModel indexes the body groups
                 // unguarded, and the moment one throws, every part after it never activates and the body is
@@ -638,6 +735,49 @@ namespace SailwindPlayerModel
             }
         }
 
+        // ---- face covers ---------------------------------------------------------------------------------
+        // Bodies this mod dressed with a face cover, by customizer instance id. Only ours: the port's NPCs share the
+        // class and are never touched.
+        private static readonly HashSet<int> _hidesBeard = new HashSet<int>();
+
+        private static void SetHidesBeard(CharacterCustomizer c, bool hide)
+        {
+            if (hide) _hidesBeard.Add(c.GetInstanceID());
+            else _hidesBeard.Remove(c.GetInstanceID());
+        }
+
+        /// <summary>Called when a body goes, so the table does not keep dead ids. Safe to call on anything.</summary>
+        public static void Forget(GameObject bodyClone)
+        {
+            if (bodyClone == null) return;
+            var c = bodyClone.GetComponentInChildren<CharacterCustomizer>(true);
+            if (c != null) _hidesBeard.Remove(c.GetInstanceID());
+        }
+
+        /// <summary>
+        /// Postfix on CharacterCustomizer.UpdateModel (private, so registered through GuardedPatches): on a body this
+        /// mod dressed with a face cover, the beard UpdateModel just switched on goes off again. ClearItems switches it
+        /// off on the next build anyway, so leaving it in the customizer's own list is harmless. A skipped patch only
+        /// lets the beard show through the cover.
+        /// </summary>
+        internal static class FaceCoverHidesBeard
+        {
+            internal static void Postfix(CharacterCustomizer __instance)
+            {
+                try
+                {
+                    if (__instance == null || __instance.isFemale || !_hidesBeard.Contains(__instance.GetInstanceID())) return;
+                    var beards = __instance.male != null ? __instance.male.facialHair : null;
+                    int i = __instance.maleFacialHair;
+                    if (beards != null && i >= 0 && i < beards.Count && beards[i] != null) beards[i].SetActive(false);
+                }
+                catch (Exception e)
+                {
+                    Plugin.Log.LogWarning("[Appearance] Could not hide the beard under the face cover: " + e.Message);
+                }
+            }
+        }
+
         // ---- persistence / wire ------------------------------------------------------------------------
         // Format: "key=value;key=value". KEY-ADDRESSED on purpose rather than positional, so adding a slot
         // in a later version cannot silently reinterpret an existing player's saved choices as a different
@@ -700,8 +840,9 @@ namespace SailwindPlayerModel
             var a = Default();
             if (steamId == 0UL) return a;
             // Cheap decorrelation: a different odd multiplier per slot, so neighbouring ids do not produce
-            // near-identical characters the way a single hash reused across slots would.
-            for (int i = 1; i < Slots.Length; i++)
+            // near-identical characters the way a single hash reused across slots would. Only the core slots: the
+            // rows added after them stay at 0 (no hood, no gear, gloves with the torso).
+            for (int i = 1; i < CoreSlotCount && i < Slots.Length; i++)
             {
                 ulong h = steamId * (0x9E3779B97F4A7C15UL + ((ulong)i * 2654435761UL));
                 h ^= h >> 29;

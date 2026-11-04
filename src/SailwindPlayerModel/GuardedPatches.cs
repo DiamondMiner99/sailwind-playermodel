@@ -21,6 +21,13 @@ namespace SailwindPlayerModel
                 typeof(PointerPlaced), null, "Postfix");
             Try(harmony, typeof(StartMenu), "FadeStartMenu", new[] { typeof(int) },
                 typeof(PauseMenuPatches.InGameTitleFadePatch), "Prefix", null);
+            Try(harmony, typeof(PsychoticLab.CharacterCustomizer), "UpdateModel", Type.EmptyTypes,
+                typeof(PlayerAppearance.FaceCoverHidesBeard), null, "Postfix");
+            Try(harmony, typeof(PlayerHeadSmoothing), "LateUpdate", Type.EmptyTypes,
+                typeof(HeadSmoothingOnAxis), null, "Postfix");
+            foreach (string read in new[] { "GetKey", "GetKeyDown", "GetKeyUp" })
+                Try(harmony, typeof(GameInput), read, new[] { typeof(InputName) },
+                    typeof(CharacterScreen.TypingHoldsGameKeys), "Prefix", null);
         }
 
         // The prefix and postfix of one patch go on in a single Patch call, and both are looked up before it, so a

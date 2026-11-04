@@ -119,7 +119,11 @@ namespace SailwindPlayerModel
                 spec = FromMesh(mesh, wheel, pump) ?? FromBounds(mesh, wheel, pump);
             }
             Bounds tillerBounds = default(Bounds);
-            if (wheel && LooksLikeTiller(control, mesh)) tillerBounds = MeasureTiller(spec, control, mesh, Vector3.up);
+            if (wheel)
+            {
+                Vector3 boatUp = BoatUp(control);
+                if (LooksLikeTiller(control, mesh, boatUp)) tillerBounds = MeasureTiller(spec, control, mesh, boatUp);
+            }
             _cache[id] = spec;
             if (spec.IsTiller)
             {
@@ -143,15 +147,35 @@ namespace SailwindPlayerModel
         }
 
         /// <summary>
-        /// A steering wheel turning about an axis that stands roughly upright swings side to side, which is a tiller.
-        /// Named "tiller" counts too, for one built on a heeled or oddly turned parent.
+        /// A steering wheel turning about an axis that stands roughly upright on its boat swings side to side, which is a
+        /// tiller. Named "tiller" counts too, for one built on an oddly turned parent.
         /// </summary>
-        private static bool LooksLikeTiller(Transform control, Mesh mesh)
+        private static bool LooksLikeTiller(Transform control, Mesh mesh, Vector3 boatUp)
         {
             Vector3 axis = control.TransformPoint(Vector3.right) - control.position;
-            if (axis.sqrMagnitude > 1e-8f && Mathf.Abs(Vector3.Dot(axis.normalized, Vector3.up)) > 0.6f) return true;
+            if (axis.sqrMagnitude > 1e-8f && Mathf.Abs(Vector3.Dot(axis.normalized, boatUp)) > 0.6f) return true;
             return control.name.IndexOf("tiller", StringComparison.OrdinalIgnoreCase) >= 0
                    || (mesh != null && mesh.name.IndexOf("tiller", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        /// <summary>
+        /// Up on the boat the control belongs to, so the answer does not hang on how the boat lies at the first grab: the
+        /// answer is kept for the session, and a wheel first taken with the bow pitched up or down would otherwise count
+        /// as a tiller from then on. The boat's root carries BoatRefs, or the rigidbody on a boat without it. World up
+        /// for a control on neither.
+        /// </summary>
+        private static Vector3 BoatUp(Transform control)
+        {
+            Transform boat = null;
+            var refs = control.GetComponentInParent<BoatRefs>();
+            if (refs != null) boat = refs.transform;
+            else
+            {
+                // From the parent: a control with a rigidbody of its own would otherwise measure against itself.
+                var body = control.parent != null ? control.parent.GetComponentInParent<Rigidbody>() : null;
+                if (body != null) boat = body.transform;
+            }
+            return boat != null ? boat.up : Vector3.up;
         }
 
         /// <summary>
@@ -346,10 +370,38 @@ namespace SailwindPlayerModel
         private Vector3 _fromLocalR, _fromLocalL;     // last frame's palm, control-local
         private Vector3 _startLocalR, _startLocalL;   // where a re-grip let go, control-local
         private bool _continuous, _sameHandle;
-        private bool _logged;
+        private bool _logged, _loggedSeated;
+        private int _oneHand;   // sitting at a wheel: 1 the right hand steers, -1 the left, 0 both hands are on
+        // Where the arms' palms are, for both hands to travel from when a wheel held from a seat is stood up to.
+        private Vector3 _handsR, _handsL;
+        private bool _regripFromHands;
+
+        // How far a handle carries the one hand before it takes the next. Tighter than HelmReleaseArc: two hands share
+        // the wheel's far side between them, and one hand has to stay near the side it can reach.
+        private const float OneHandArcDeg = 45f;
+        // Where the one hand wants to be: the part of the rim nearest its shoulder, pulled down and out to where a
+        // resting hand holds a wheel. Without this, a seat square behind the hub leaves the nearest point undefined.
+        private const float OneHandDrop = 0.25f, OneHandOut = 0.25f;
 
         public bool Active { get { return _control != null && _spec != null; } }
         public Transform Control { get { return _control; } }
+
+        /// <summary>Which hand steers a wheel from a seat: 1 the right, -1 the left, 0 both hands are on the control.</summary>
+        public int OneHandSide { get { return _oneHand; } }
+
+        /// <summary>Where the arms' palms are this frame. Call before <see cref="Update"/>.</summary>
+        public void NoteHands(Vector3 palmR, Vector3 palmL)
+        {
+            _handsR = palmR;
+            _handsL = palmL;
+        }
+
+        /// <summary>Whether this control is steered with one hand from a seat.</summary>
+        public static bool SteersOneHanded(Transform control)
+        {
+            var spec = control != null ? RotorSpecs.For(control) : null;
+            return spec != null && OneHanded(spec);
+        }
 
         // Per-frame results.
         public Vector3 Hub, FaceNormal, StandPoint, PalmR, PalmL, FingerR, FingerL, NormalR, NormalL, AxisR, AxisL;
@@ -360,14 +412,18 @@ namespace SailwindPlayerModel
             _control = null;
             _spec = null;
             _handleR = _handleL = -1;
+            _oneHand = 0;
         }
 
         /// <summary>
         /// Update the grips. <paramref name="bodyPos"/> is the vanilla player position, never the moved body;
         /// <paramref name="shoulderForward"/> is how far the shoulders sit in front of it, so the stand distance
-        /// is measured from the shoulders.
+        /// is measured from the shoulders. Seated, <paramref name="bodyPos"/> is the middle of the seated shoulders,
+        /// and <paramref name="seatRight"/> and <paramref name="shoulderHalf"/> say where each shoulder is, which a
+        /// wheel steered with one hand is measured from.
         /// </summary>
-        public bool Update(Transform control, Vector3 bodyPos, float shoulderForward, float armLength, float dt)
+        public bool Update(Transform control, Vector3 bodyPos, float shoulderForward, float armLength, float dt,
+            bool seated = false, Vector3 seatRight = default(Vector3), float shoulderHalf = 0f)
         {
             if (control == null) { Release(); return false; }
             if (control != _control)
@@ -377,6 +433,9 @@ namespace SailwindPlayerModel
                 _handleR = _handleL = -1;
                 _regripR = _regripL = 0f;
                 _logged = false;
+                _loggedSeated = false;
+                _oneHand = 0;
+                _regripFromHands = false;
             }
             RotorFrame f;
             if (!BuildFrame(control, _spec, bodyPos, out f)) return false;
@@ -389,10 +448,31 @@ namespace SailwindPlayerModel
             _sameHandle = f.SameHandle;
             float idealR = f.IdealR, idealL = f.IdealL;
 
+            if (seated && OneHanded(_spec))
+            {
+                UpdateOneHand(control, f, bodyPos + seatRight * shoulderHalf, bodyPos - seatRight * shoulderHalf, dt);
+                return true;
+            }
+            // Standing up with the wheel still held, both hands travel to it from where they are, the free one off the
+            // thigh, rather than appearing on their handles.
+            if (_oneHand != 0)
+            {
+                _oneHand = 0;
+                _handleR = _handleL = -1;
+                _regripFromHands = true;
+            }
+
             if (_handleR < 0)
             {
                 _handleR = Pick(control, up, right, idealR, -1, _sameHandle ? 0 : 1);
                 _handleL = _sameHandle ? _handleR : Pick(control, up, right, idealL, _handleR, -1);
+                if (_regripFromHands)
+                {
+                    _regripFromHands = false;
+                    _startLocalR = control.InverseTransformPoint(_handsR);
+                    _startLocalL = control.InverseTransformPoint(_handsL);
+                    _regripR = _regripL = RegripSeconds;
+                }
             }
             else if (!_continuous)
             {
@@ -465,6 +545,101 @@ namespace SailwindPlayerModel
             return true;
         }
 
+        /// <summary>A ship's wheel worked from a seat takes one hand. Winches and pumps keep both on the handle.</summary>
+        private static bool OneHanded(RotorSpec spec)
+        {
+            return spec.IsWheel && !spec.IsTiller
+                && InteractionTuning.SeatedWheelOneHand != null && InteractionTuning.SeatedWheelOneHand.Value;
+        }
+
+        /// <summary>
+        /// One hand on a wheel from a seat. The hand that has the shorter reach takes it and keeps it until the wheel is
+        /// let go, riding a handle round and moving to the next as the wheel turns. The other hand is left free, and the
+        /// body rests it on the thigh.
+        /// </summary>
+        private void UpdateOneHand(Transform control, RotorFrame f, Vector3 shoulderR, Vector3 shoulderL, float dt)
+        {
+            bool first = _oneHand == 0;
+            if (first)
+            {
+                Vector3 wantR, wantL;
+                _oneHand = OneHandFarthest(f, shoulderR, shoulderL, out wantR, out wantL) ? 1 : -1;
+                _handleR = _handleL = -1;
+                _regripR = _regripL = 0f;
+            }
+            bool rightHand = _oneHand > 0;
+            float ideal = OneHandIdeal(f, rightHand ? shoulderR : shoulderL, rightHand);
+
+            int handle = rightHand ? _handleR : _handleL;
+            if (handle < 0) handle = Pick(control, f.Up, f.Right, ideal, -1, 0);
+            else
+            {
+                float off = Mathf.Abs(Mathf.DeltaAngle(WorldAngle(control, handle, f.Up, f.Right), ideal));
+                if (off > OneHandArcDeg)
+                {
+                    // Only to a handle nearer the hand. On a modded wheel with few handles the next can be farther off than
+                    // this one, and moving there would start the same move back on the next frame.
+                    int next = Pick(control, f.Up, f.Right, ideal, handle, 0);
+                    if (next != handle && Mathf.Abs(Mathf.DeltaAngle(WorldAngle(control, next, f.Up, f.Right), ideal)) < off)
+                    {
+                        StartRegrip(rightHand, next);
+                        handle = next;
+                    }
+                }
+            }
+
+            Vector3 target = control.TransformPoint(_spec.LocalPoint(_spec.Angles[handle], f.GripR, _spec.HandleDepth));
+            Vector3 palm;
+            if (rightHand)
+            {
+                _handleR = handle;
+                palm = Regrip(ref _regripR, _startLocalR, target, f.Face, dt);
+                _fromLocalR = control.InverseTransformPoint(palm);
+            }
+            else
+            {
+                _handleL = handle;
+                palm = Regrip(ref _regripL, _startLocalL, target, f.Face, dt);
+                _fromLocalL = control.InverseTransformPoint(palm);
+            }
+
+            Vector3 radial = Radial(control, handle, f.Axis);
+            Vector3 finger = Vector3.Cross(f.Axis, radial);
+            PalmR = PalmL = palm;
+            AxisR = AxisL = radial;
+            NormalR = NormalL = -f.Face;
+            FingerR = FingerL = finger;
+            StandPoint = f.Hub;
+
+            if (first && !_loggedSeated)
+            {
+                _loggedSeated = true;
+                Plugin.Log.LogInfo($"[Interaction] took hold of '{control.name}' from a seat with the {(rightHand ? "right" : "left")} hand: " +
+                    $"hub {Vector3.Distance(rightHand ? shoulderR : shoulderL, f.Hub):F2} m from the shoulder, grip radius {f.GripRadiusWorld:F2}");
+            }
+        }
+
+        /// <summary>Where one hand wants to be on the rim, in degrees in the rotor plane.</summary>
+        private static float OneHandIdeal(RotorFrame f, Vector3 shoulder, bool rightHand)
+        {
+            Vector3 d = shoulder - f.Hub;
+            float up = Vector3.Dot(d, f.Up) - OneHandDrop;
+            float right = Vector3.Dot(d, f.Right) + (rightHand ? OneHandOut : -OneHandOut);
+            return Mathf.Atan2(right, up) * Mathf.Rad2Deg;
+        }
+
+        /// <summary>
+        /// The farthest each hand would be carried steering alone. True when the right hand has the shorter reach. A tie
+        /// goes to the right, so a seat square behind the wheel steers the same on every machine.
+        /// </summary>
+        private static bool OneHandFarthest(RotorFrame f, Vector3 shoulderR, Vector3 shoulderL, out Vector3 wantR, out Vector3 wantL)
+        {
+            float idealR = OneHandIdeal(f, shoulderR, true), idealL = OneHandIdeal(f, shoulderL, false);
+            wantR = FarthestOnArc(f, f.GripR * f.Scale, shoulderR, idealR - OneHandArcDeg, idealR + OneHandArcDeg);
+            wantL = FarthestOnArc(f, f.GripR * f.Scale, shoulderL, idealL - OneHandArcDeg, idealL + OneHandArcDeg);
+            return Vector3.Distance(shoulderR, wantR) <= Vector3.Distance(shoulderL, wantL) + 0.001f;
+        }
+
         /// <summary>
         /// The rotor's frame as seen from <paramref name="bodyPos"/>. False for anything with no handles to hold.
         /// </summary>
@@ -528,9 +703,11 @@ namespace SailwindPlayerModel
         /// turned all the way round are measured where the arms are longest; <paramref name="aim"/> is the midpoint
         /// of the two, for the lean and the behind-the-seat test. Measured through the same frame the standing pose
         /// is built from, so the two can never disagree. False for a tiller and for anything with no handles to hold.
+        /// <paramref name="side"/> is the hand already steering a wheel (see <see cref="OneHandSide"/>), which is then the
+        /// one measured; 0 measures the hand that would be chosen.
         /// </summary>
         public static bool MeasureSeated(Transform control, Vector3 shoulderMid, Vector3 shoulderRight, float shoulderHalf,
-            out float need, out Vector3 aim)
+            out float need, out Vector3 aim, int side = 0)
         {
             need = 0f;
             aim = shoulderMid;
@@ -543,6 +720,15 @@ namespace SailwindPlayerModel
             Vector3 handR = shoulderMid + shoulderRight * shoulderHalf;
             Vector3 handL = shoulderMid - shoulderRight * shoulderHalf;
             Vector3 wantR, wantL;
+            // A wheel from a seat is steered with whichever hand has the shorter reach, so that hand alone counts.
+            if (OneHanded(spec))
+            {
+                bool rightHand = OneHandFarthest(f, handR, handL, out wantR, out wantL);
+                if (side != 0) rightHand = side > 0;
+                need = rightHand ? Vector3.Distance(handR, wantR) : Vector3.Distance(handL, wantL);
+                aim = rightHand ? wantR : wantL;
+                return true;
+            }
             if (f.Continuous)
             {
                 // The hands never let go of a pump or a small winch, so each one really does visit the far side of

@@ -55,6 +55,7 @@ namespace SailwindPlayerModel
             if (src == null) return false;
 
             var template = UnityEngine.Object.Instantiate(src);
+            RestoreRestPose(src, template);
             // PortDude.Awake calls port.RegisterDude(this), and Instantiate runs Awake at once on an active
             // source. The character object normally carries no PortDude (it sits on the parent), but if a
             // layout ever puts them together, hand the job back to the real one before the clone is stripped.
@@ -99,17 +100,24 @@ namespace SailwindPlayerModel
         /// the CharacterCustomizer: found by walking up from the NPC script's object, then by searching down
         /// into its children, which is where both the harbormaster and the shopkeepers keep it. Only NPCs
         /// that are active in the hierarchy qualify: an inactive one never ran its Start, so its part lists
-        /// are empty and it cannot be dressed. Among the candidates, a real port's harbormaster at the
-        /// standard size wins, and leftover objects with "test" in the name lose. Ties go to the lowest
-        /// parent-and-name string, so every machine on the same game build clones the SAME NPC and wears
-        /// the same palette: each NPC carries its own material colors, and FindObjectsOfTypeAll's order is
-        /// not the same from one machine to the next.
+        /// are empty and it cannot be dressed.
+        ///
+        /// THE STANCE COMES WITH THE CLONE. Each NPC's arms are posed in the scene, and the body keeps the cloned
+        /// arms as its rest pose. Most harbormasters stand arms down, but a few are posed differently: the
+        /// Lagoon Temple one stands with his hands on his hips, and every body cloned from him did too. So the
+        /// stance most of the candidates share wins first, then the standard size, and leftover objects with
+        /// "test" in the name lose. Ties go to the lowest parent-and-name string, so every machine on the same
+        /// game build clones the SAME NPC and wears the same palette: each NPC carries its own material colors,
+        /// and FindObjectsOfTypeAll's order is not the same from one machine to the next. Nothing here may
+        /// depend on where the player is: whether a harbormaster's port is registered depends on which island
+        /// scenes are loaded, and scoring on it picked the Lagoon harbormasters for anyone who loaded nearby.
         /// </summary>
         private static GameObject PickSource<T>() where T : Component
         {
-            GameObject best = null;
-            int bestScore = int.MinValue;
-            string bestKey = null;
+            var roots = new List<GameObject>();
+            var keys = new List<string>();
+            var scores = new List<int>();
+            var stances = new List<Quaternion[]>();
             foreach (var c in Resources.FindObjectsOfTypeAll<T>())
             {
                 if (c == null) continue;
@@ -125,16 +133,108 @@ namespace SailwindPlayerModel
                 if (go.name.IndexOf("test", StringComparison.OrdinalIgnoreCase) >= 0) score -= 10;
                 var ls = root.transform.localScale;
                 if (Mathf.Abs(ls.x - 1f) < 0.01f && Mathf.Abs(ls.y - 1f) < 0.01f && Mathf.Abs(ls.z - 1f) < 0.01f) score += 1;
-                var dude = c as PortDude;
-                if (dude != null && dude.GetPort() != null) score += 2;
 
-                string key = (go.transform.parent != null ? go.transform.parent.name : "") + "/" + go.name;
-                if (score > bestScore || (score == bestScore && string.CompareOrdinal(key, bestKey) < 0))
+                roots.Add(root);
+                keys.Add((go.transform.parent != null ? go.transform.parent.name : "") + "/" + go.name);
+                scores.Add(score);
+                stances.Add(Stance(root.transform));
+            }
+
+            // The stance the most candidates share. One with no arm bones to read shares nothing.
+            int[] alike = new int[roots.Count];
+            int most = 0;
+            for (int i = 0; i < roots.Count; i++)
+            {
+                if (stances[i] == null) continue;
+                for (int j = 0; j < roots.Count; j++)
+                    if (stances[j] != null && SameStance(stances[i], stances[j])) alike[i]++;
+                most = Mathf.Max(most, alike[i]);
+            }
+
+            GameObject best = null;
+            int bestScore = int.MinValue;
+            string bestKey = null;
+            for (int i = 0; i < roots.Count; i++)
+            {
+                int score = scores[i] + (most > 1 && alike[i] == most ? 4 : 0);
+                if (score > bestScore || (score == bestScore && string.CompareOrdinal(keys[i], bestKey) < 0))
                 {
-                    best = root; bestScore = score; bestKey = key;
+                    best = roots[i]; bestScore = score; bestKey = keys[i];
                 }
             }
             return best;
+        }
+
+        private static readonly string[] StanceBones = { "Shoulder_L", "Shoulder_R", "Elbow_L", "Elbow_R" };
+
+        /// <summary>
+        /// The arms' local rotations as posed in the scene, or null without the bones. A bone the NPC breathes with is
+        /// read from its rest rotation, so the vote does not hang on the moment of the breath each machine catches.
+        /// </summary>
+        private static Quaternion[] Stance(Transform root)
+        {
+            Transform[] breathe = null;
+            Quaternion[] rest = null;
+            try
+            {
+                var anim = root.GetComponentInChildren<NPCAnimations>(true);
+                if (anim != null)
+                {
+                    breathe = anim.breatheParts;
+                    rest = Traverse.Create(anim).Field("baseRots").GetValue<Quaternion[]>();
+                }
+            }
+            catch { breathe = null; rest = null; }
+            var q = new Quaternion[StanceBones.Length];
+            for (int i = 0; i < StanceBones.Length; i++)
+            {
+                var b = FindDeep(root, StanceBones[i]);
+                if (b == null) return null;
+                q[i] = b.localRotation;
+                if (breathe != null && rest != null)
+                    for (int k = 0; k < breathe.Length && k < rest.Length; k++)
+                        if (breathe[k] == b) { q[i] = rest[k]; break; }
+            }
+            return q;
+        }
+
+        // Within 10 degrees on every arm bone: the game's breathing moves a posed arm a few degrees, while a
+        // different stance differs by 50 or more.
+        private static bool SameStance(Quaternion[] a, Quaternion[] b)
+        {
+            for (int i = 0; i < a.Length; i++)
+                if (Quaternion.Angle(a[i], b[i]) > 10f) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// Put the clone's head and breathing bones back where the NPC stands at rest. NPCAnimations turns the head
+        /// to a player nearby and rocks the breathing bones every frame, and Instantiate copies whatever moment it
+        /// caught, so a body built beside the harbormaster could keep his head turned for good. His rest rotations
+        /// are private on the source's component (set in its Start); the clone's component has the same bones,
+        /// remapped by Instantiate. Before Strip removes it. A failure leaves the pose as cloned.
+        /// </summary>
+        private static void RestoreRestPose(GameObject src, GameObject clone)
+        {
+            try
+            {
+                var from = src.GetComponentInChildren<NPCAnimations>(true);
+                var to = clone.GetComponentInChildren<NPCAnimations>(true);
+                if (from == null || to == null) return;
+                var t = Traverse.Create(from);
+                var baseRots = t.Field("baseRots").GetValue<Quaternion[]>();
+                // Set in Start together with the head's rest; without it the head's would be an all-zero quaternion.
+                if (baseRots == null) return;
+                if (to.breatheParts != null)
+                    for (int i = 0; i < baseRots.Length && i < to.breatheParts.Length; i++)
+                        if (to.breatheParts[i] != null) to.breatheParts[i].localRotation = baseRots[i];
+                if (to.head != null && from.head != null)
+                    to.head.localRotation = t.Field("headInitialRot").GetValue<Quaternion>();
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning("[PlayerModel] Could not reset the cloned NPC's head and breathing pose: " + e.Message);
+            }
         }
 
         /// <summary>

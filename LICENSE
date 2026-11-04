@@ -19,10 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-src/ThreeSheets/ConfigurationManagerAttributes.cs is not covered by the above.
-It is distributed by the BepInEx ConfigurationManager project for plugin authors
-to include verbatim, and remains under that project's license (LGPL-3.0):
-https://github.com/BepInEx/BepInEx.ConfigurationManager

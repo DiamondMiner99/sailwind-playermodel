@@ -116,6 +116,16 @@ namespace SailwindPlayerModel
         }
 
         /// <summary>
+        /// The table in front of the local player's seat: the middle of its near edge and the way its top faces. False
+        /// with no table, not sitting with the feet down, or with ArmsOnTables off. Feed it to a body with
+        /// <see cref="SyntyBody.SetSeatTable"/> each frame along with <see cref="SyntyBody.SetSeat"/>.
+        /// </summary>
+        public static bool TryGetLocalSeatTable(out Vector3 edgeWorld, out Vector3 upWorld)
+        {
+            return Seating.TryGetTable(out edgeWorld, out upWorld);
+        }
+
+        /// <summary>
         /// Whether the local player is lying in one of the game's beds, and where: the head, the direction the
         /// feet point, and the direction the chest faces. Feed it to a body with <see cref="SyntyBody.SetLying"/>.
         /// </summary>

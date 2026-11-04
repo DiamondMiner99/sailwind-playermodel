@@ -241,6 +241,8 @@ namespace SailwindPlayerModel
             if (Seating.TryGetSeat(out a, out b, out legs, out floorY))
             {
                 _body.SetSeat(a, b, legs, floorY);
+                Vector3 edge, up;
+                if (Seating.TryGetTable(out edge, out up)) _body.SetSeatTable(edge, up);
                 return;
             }
             Vector3 c;

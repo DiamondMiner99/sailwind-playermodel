@@ -536,6 +536,7 @@ namespace SailwindPlayerModel
             ClearChestFade();
             if (_scorch != null) { _scorch.Destroy(); _scorch = null; }
             PlayerAppearance.ReleaseOwnedMaterial(_instance);
+            PlayerAppearance.Forget(_instance);
             if (_instance != null) UnityEngine.Object.Destroy(_instance);
             _instance = null;
             _renderers = null;
@@ -680,6 +681,21 @@ namespace SailwindPlayerModel
             _seatFloorY = floorWorldY;
             _seatFrame = Time.frameCount;
         }
+
+        /// <summary>
+        /// A table in front of the seat this frame: the middle of its near edge and the way its top faces. Empty hands
+        /// rest on it instead of the thighs. Call every frame with <see cref="SetSeat"/> while there is one.
+        /// </summary>
+        public void SetSeatTable(Vector3 edgeWorld, Vector3 upWorld)
+        {
+            _tableEdge = edgeWorld;
+            _tableUp = upWorld;
+            _tableFrame = Time.frameCount;
+        }
+
+        private Vector3 _tableEdge, _tableUp;
+        private int _tableFrame = -10;
+        private float _table01;
 
         /// <summary>
         /// Lay this body down this frame, on its back: head at <paramref name="headWorld"/>, feet toward
@@ -1382,6 +1398,7 @@ namespace SailwindPlayerModel
                 _seatYawVel = 0f;
                 _seatNextSign = 1f;
                 _tuck = 0f;
+                _table01 = 0f;   // a table from the last seat must not pull the hands on this one
                 _straddle01 = _seatPose == SeatPose.Straddle ? 1f : 0f;
                 int pose = FloorIndex(_seatPose);
                 for (int i = 0; i < _floorW.Length; i++) _floorW[i] = i == pose ? 1f : 0f;
@@ -1421,6 +1438,7 @@ namespace SailwindPlayerModel
             float turning = Mathf.Abs(_seatYawGoal - _seatYaw);
             _tuck = Mathf.Lerp(_tuck, turning > 12f ? 1f : 0f, 1f - Mathf.Exp(-12f * dt));
             _straddle01 = Mathf.Lerp(_straddle01, _seatPose == SeatPose.Straddle ? 1f : 0f, 1f - Mathf.Exp(-8f * dt));
+            _table01 = Mathf.Lerp(_table01, Time.frameCount - _tableFrame <= 1 && _seatPose == SeatPose.FeetDown ? 1f : 0f, 1f - Mathf.Exp(-6f * dt));
             _seatHipsOffset = Vector3.Lerp(_seatHipsOffset, Vector3.zero, 1f - Mathf.Exp(-8f * dt));
             int floorPose = FloorIndex(_seatPose);
             float ease = 1f - Mathf.Exp(-6f * dt);
@@ -1506,9 +1524,12 @@ namespace SailwindPlayerModel
 
         /// <summary>The seated shoulders as drawn: over the seat's hips by the torso's own height, and a little
         /// forward, which is where the seated slouch carries them.</summary>
-        private Vector3 SeatedShoulderMid()
+        // Flat, in the world: the way the seat faces once any swing in progress has finished.
+        private Vector3 SeatGoalForward()
         {
-            return SeatedShoulderMid(SeatHipsDrawn(), (_root.rotation * SeatYaw()) * Vector3.forward);
+            Vector3 f = _seatTracking ? Quaternion.Euler(0f, _seatYawGoal, 0f) * Vector3.forward : _seatForward;
+            f.y = 0f;
+            return f.sqrMagnitude > 1e-6f ? f.normalized : (_root.rotation * SeatYaw()) * Vector3.forward;
         }
 
         /// <summary>The same, for a seat handed in rather than the one this body is drawing.</summary>
@@ -1544,8 +1565,10 @@ namespace SailwindPlayerModel
             flat.Normalize();
             Vector3 shoulderMid = SeatedShoulderMid(hipsWorld, flat);
             Vector3 aim;
-            if (!RotorGrip.MeasureSeated(control, shoulderMid, Vector3.Cross(Vector3.up, flat), _shoulderHalf, out need, out aim))
+            if (!RotorGrip.MeasureSeated(control, shoulderMid, Vector3.Cross(Vector3.up, flat), _shoulderHalf, out need, out aim,
+                    _rotor.Control == control ? _rotor.OneHandSide : 0))
                 return false;
+            need += ChestTurnReachLost(control, flat, shoulderMid, aim);
 
             // The arms reach to the palm and no farther (the IK clamps there), and the lean adds exactly the
             // shoulder travel the seated lean provides, so the limit promises nothing the body does not do.
@@ -2184,8 +2207,13 @@ namespace SailwindPlayerModel
                 // Seated, the hands are placed from where the seat puts the shoulders, not from the root: while
                 // sitting the root is well below the seat, and a crewmate's is the standing spot they sat down
                 // from, which can be meters away and puts left and right on the wrong sides.
-                rotor = _rotor.Update(_ixTarget, seated ? SeatedShoulderMid() : _root.position,
-                    seated ? 0f : Mathf.Max(0f, _shoulderMidRoot.z), _armR.Length, dt);
+                // From the facing and hips the seat is going to, not the ones eased toward them: the hand chosen here is
+                // kept until the wheel is let go, and the seat's reach test measured the seat as it will be after a swing.
+                _rotor.NoteHands(_armR.PalmPosition, _armL.Ready ? _armL.PalmPosition : _armR.PalmPosition);
+                Vector3 seatGoal = seated ? SeatGoalForward() : Vector3.forward;
+                rotor = _rotor.Update(_ixTarget, seated ? SeatedShoulderMid(_seatHips, seatGoal) : _root.position,
+                    seated ? 0f : Mathf.Max(0f, _shoulderMidRoot.z), _armR.Length, dt,
+                    seated, Vector3.Cross(Vector3.up, seatGoal), _shoulderHalf);
             }
             else if (_rotor.Active)
             {
@@ -2325,8 +2353,9 @@ namespace SailwindPlayerModel
             Vector3 shoulderMid = SeatedShoulderMid(SeatHipsDrawn(), seatFwd);
             float need;
             Vector3 aim;
-            if (!RotorGrip.MeasureSeated(_ixTarget, shoulderMid, Vector3.Cross(Vector3.up, seatFwd), _shoulderHalf, out need, out aim))
+            if (!RotorGrip.MeasureSeated(_ixTarget, shoulderMid, Vector3.Cross(Vector3.up, seatFwd), _shoulderHalf, out need, out aim, _rotor.OneHandSide))
                 return;
+            need += ChestTurnReachLost(_ixTarget, seatFwd, shoulderMid, aim);
 
             float torso = ShoulderAboveHips();
             if (torso > 0.05f)
@@ -2342,6 +2371,21 @@ namespace SailwindPlayerModel
                 float cap = InteractionTuning.SeatedTurnDegrees.Value;
                 turnDeg = Mathf.Clamp(Vector3.SignedAngle(seatFwd, toAim.normalized, Vector3.up), -cap, cap);
             }
+        }
+
+        /// <summary>
+        /// How much reach a chest turned toward a wheel costs the hand steering it. Turning toward a control on the steering
+        /// hand's side carries that shoulder back, up to half the shoulder width times the sine of the turn. Counted whichever
+        /// way the turn goes, so the reach test never promises what the turned body cannot do.
+        /// </summary>
+        private float ChestTurnReachLost(Transform control, Vector3 flatForward, Vector3 shoulderMid, Vector3 aim)
+        {
+            if (!RotorGrip.SteersOneHanded(control)) return 0f;
+            Vector3 toAim = aim - shoulderMid;
+            toAim.y = 0f;
+            if (toAim.sqrMagnitude < 1e-6f) return 0f;
+            float turn = Mathf.Min(Vector3.Angle(flatForward, toAim), InteractionTuning.SeatedTurnDegrees.Value);
+            return _shoulderHalf * Mathf.Sin(turn * Mathf.Deg2Rad);
         }
 
         /// <summary>
@@ -2474,8 +2518,11 @@ namespace SailwindPlayerModel
                 case InteractionKind.Crank:
                     if (_rotor.Active)
                     {
-                        gr = new HandGrip { On = true, Palm = _rotor.PalmR, Normal = _rotor.NormalR, Finger = _rotor.FingerR, Axis = _rotor.AxisR };
-                        gl = new HandGrip { On = true, Palm = _rotor.PalmL, Normal = _rotor.NormalL, Finger = _rotor.FingerL, Axis = _rotor.AxisL };
+                        // A wheel steered from a seat has one hand on it; the other is left for the seat to rest.
+                        if (_rotor.OneHandSide >= 0)
+                            gr = new HandGrip { On = true, Palm = _rotor.PalmR, Normal = _rotor.NormalR, Finger = _rotor.FingerR, Axis = _rotor.AxisR };
+                        if (_rotor.OneHandSide <= 0)
+                            gl = new HandGrip { On = true, Palm = _rotor.PalmL, Normal = _rotor.NormalL, Finger = _rotor.FingerL, Axis = _rotor.AxisL };
                     }
                     else if (kind == InteractionKind.Helm && _tiller.Active)
                     {
@@ -2620,6 +2667,30 @@ namespace SailwindPlayerModel
                 palm = Vector3.Lerp(palm, hips + outward * 0.24f - fwd * 0.02f - Vector3.up * 0.08f, _tuck);
                 normal = Vector3.Slerp(normal, Vector3.down, _tuck);
                 finger = Vector3.Slerp(finger, fwd, _tuck);
+            }
+
+            // At a table: flat on the top a hand's length past the near edge, a little in from the shoulder, fingers
+            // turned in. Only where the arm reaches it; farther off the hand stays on the thigh.
+            float onTable = _table01 * (1f - Mathf.Clamp01(floorW)) * (1f - _straddle01) * (1f - _tuck);
+            if (onTable > 0.001f)
+            {
+                Vector3 up = _tableUp.sqrMagnitude > 1e-6f ? _tableUp : Vector3.up;
+                Vector3 flatFwd = Vector3.ProjectOnPlane(fwd, up).normalized;
+                Vector3 flatOut = Vector3.ProjectOnPlane(outward, up).normalized;
+                Vector3 top = _tableEdge + flatFwd * 0.12f + flatOut * 0.16f + up * 0.015f;
+                ArmIk arm = right ? _armR : _armL;
+                Transform shoulder = right ? _bShoulderR : _bShoulderL;
+                // Faded out across the last stretch of reach rather than cut off at it, so a shoulder moving with the
+                // breathing or a turn on the seat does not flip the hand between thigh and table.
+                float reach = arm.Ready ? arm.Length + arm.PalmReach : 0f;
+                if (shoulder != null && reach > 0f)
+                    onTable *= 1f - Mathf.InverseLerp(0.88f * reach, 0.97f * reach, (top - shoulder.position).magnitude);
+                if (onTable > 0.001f)
+                {
+                    palm = Vector3.Lerp(palm, top, onTable);
+                    normal = Vector3.Slerp(normal, -up, onTable);
+                    finger = Vector3.Slerp(finger, (flatFwd - flatOut * 0.35f).normalized, onTable);
+                }
             }
             return new HandGrip { On = true, Palm = palm, Normal = normal, Finger = finger };
         }

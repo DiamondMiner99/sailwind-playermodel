@@ -60,6 +60,16 @@ namespace SailwindPlayerModel
         }
 
         /// <summary>
+        /// The control held with the button down (the wheel or a winch under the game's mouse-steering settings), or null.
+        /// </summary>
+        public static GoPointerButton ClickedControl(GoPointer p)
+        {
+            if (p == null || ClickedRef == null) return null;
+            try { return ClickedRef(p); }
+            catch { return null; }
+        }
+
+        /// <summary>
         /// This frame's interaction. <paramref name="target"/> is the control or item involved;
         /// <paramref name="held"/> is set whenever an item is in hand, even if a control takes priority.
         /// </summary>

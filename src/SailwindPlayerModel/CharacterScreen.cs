@@ -35,8 +35,31 @@ namespace SailwindPlayerModel
         private static bool _dirty;                 // choices changed since opening
         private static bool _normalized;            // slot indices folded into the live rig's ranges
         private static PlayerAppearance _working;     // edited copy; committed when the screen closes
-        private static GUIStyle _panel, _title, _label, _button, _small;
-        private static Texture2D _panelTex, _titleTex;
+        private static GUIStyle _panel, _title, _label, _button, _small, _row, _rowOn, _field;
+        private static Texture2D _panelTex, _titleTex, _rowHoverTex;
+
+        // OUTFITS. The picked row is the one Update, Rename and Delete act on; -1 is "Current look". _currentLook holds the
+        // look that was on before the last outfit was tried, and clicking its row swaps that with what is on now, so the
+        // last unsaved look is always a click away. It is one slot: unsaved edits to an outfit replace the look kept there
+        // once another row is clicked. _pickedBaseline is the picked outfit as this rig wears it, which is what "edited" is
+        // measured against: a saved line can be spelled differently (a shared line with keys missing, or written by an
+        // older version) and still be the same look. A click only records what to do (_outfitAction), and the next Layout
+        // event does it: the rows and buttons below a click must not change between the Layout pass that placed them and
+        // the event still walking them.
+        private const string CurrentLookText = "Current look", ConfirmText = "Sure?";
+        private const float ConfirmSeconds = 3f;
+        private const string NameFieldControl = "PlayerModel_OutfitName";
+        private enum OutfitConfirm { None, Update, Delete }
+        private static int _picked = -1;
+        private static string _currentLook, _pickedBaseline;
+        private static bool _baselinePending, _outfitTrouble;
+        private static Vector2 _outfitScroll;
+        private static System.Action _outfitAction;
+        private static OutfitConfirm _confirm;
+        private static float _confirmUntil;
+        private static bool _renaming, _focusName, _columnHiddenLogged;
+        private static string _nameEdit = "";
+        private static float _outfitButtonW = 100f;
 
         // SIZE. Everything is laid out in 1080p pixels times _s, the scale the styles were last built at. It
         // is worked out on Layout events only, and only when the screen size or the setting changed, so the
@@ -61,6 +84,36 @@ namespace SailwindPlayerModel
             new System.Collections.Generic.Dictionary<string, Texture2D>();
 
         public static bool IsOpen { get { return _open; } }
+
+        /// <summary>An outfit's name is being typed, so the keys pressed are letters and not for the game.</summary>
+        public static bool IsTyping { get { return _open && _renaming; } }
+
+        // The rows in the order they are drawn, by slot key: who the character is, then what they wear on the head,
+        // then clothes, then gear. Slots are appended to PlayerAppearance in the order they were added, which is
+        // not the order a player works down a screen. A slot missing here is drawn at the end.
+        private static readonly string[] DisplayOrder =
+        {
+            "gender", "head", "hair", "eyebrow", "facialhair",
+            "headgear", "hood", "face",
+            "torso", "gloves", "hips", "legs",
+            "back", "shoulders", "elbows", "knees", "belt",
+        };
+        // Where the gear rows start, so a little space sets them apart.
+        private const string FirstGearRow = "back";
+        private static int[] _order;
+
+        private static int[] Order()
+        {
+            if (_order != null) return _order;
+            var list = new System.Collections.Generic.List<int>();
+            foreach (var key in DisplayOrder)
+                for (int i = 0; i < PlayerAppearance.SlotCount; i++)
+                    if (PlayerAppearance.Slots[i].Key == key) { list.Add(i); break; }
+            for (int i = 0; i < PlayerAppearance.SlotCount; i++)
+                if (!list.Contains(i)) list.Add(i);
+            _order = list.ToArray();
+            return _order;
+        }
 
         private static int _keyConsumedFrame = -1;
 
@@ -102,32 +155,55 @@ namespace SailwindPlayerModel
                 // assignment would share the array with Plugin's stored appearance and every registry
                 // entry - editing here would mutate them in place behind their backs.
                 _working = PlayerAppearance.Deserialize(PlayerModel.LocalAppearance.Serialize());
-                // Gender has no "none". A look nobody has saved carries 0, and Apply draws anything but 2 as
-                // male, so show it as Male. Wrapping it like the other slots turned 0 into Female.
-                _working[0] = (byte)(_working[0] == 2 ? 2 : 1);
-                // Fold indices into this rig's real ranges up front, so the screen never shows a number
-                // like "174 / 8" that the body is not actually wearing (Apply wraps, the display did not).
-                // With no body yet, Draw does it when the body appears.
-                _normalized = false;
-                var c0 = PlayerModel.GetCustomizer();
-                if (c0 != null) NormalizeWorking(c0);
-                // Colors saved as 0 mean "the NPC's own"; show them as the nearest named color so every row
-                // reads as a choice and stepping starts from where the player actually is.
-                for (int i = 0; i < PlayerAppearance.ColorSlotCount; i++)
-                    if (_working.GetColor(i) == 0)
-                    {
-                        int near = PlayerAppearance.NearestPaletteIndex(i);
-                        if (near > 0) _working.SetColor(i, (byte)near);
-                    }
+                FitWorking();
                 _dirty = false;
                 _scroll = Vector2.zero;
                 _logScale = true;
+                OutfitStore.Load();
+                _currentLook = _working.Serialize();
+                _picked = FindOutfitWorn();
+                _pickedBaseline = _picked >= 0 ? _currentLook : null;
+                _baselinePending = false;
+                _outfitTrouble = OutfitStore.LoadFailed;
+                _outfitScroll = Vector2.zero;
+                _outfitAction = null;
+                _confirm = OutfitConfirm.None;
+                _renaming = false;
                 _open = true;
                 ModPauseMenu.Hide();   // never leave clickable world-space buttons behind this panel
                 CharacterPreviewStudio.Open();
                 CharacterPreviewStudio.SetAppearance(_working);
             }
             catch (System.Exception e) { Plugin.Log.LogWarning("[Character] Open failed: " + e.Message); }
+        }
+
+        /// <summary>Make a look just loaded into the working copy read as choices this screen can show and step from.</summary>
+        private static void FitWorking()
+        {
+            // Gender has no "none". A look nobody has saved carries 0, and Apply draws anything but 2 as
+            // male, so show it as Male. Wrapping it like the other slots turned 0 into Female.
+            _working[0] = (byte)(_working[0] == 2 ? 2 : 1);
+            // Fold indices into this rig's real ranges up front, so the screen never shows a number
+            // like "174 / 8" that the body is not actually wearing (Apply wraps, the display did not).
+            // With no body yet, Draw does it when the body appears.
+            _normalized = false;
+            var c0 = PlayerModel.GetCustomizer();
+            if (c0 != null) NormalizeWorking(c0);
+            FitColors(ref _working);
+        }
+
+        /// <summary>
+        /// Colors saved as 0 mean "the NPC's own"; show them as the nearest named color so every row reads as a choice
+        /// and stepping starts from where the player actually is.
+        /// </summary>
+        private static void FitColors(ref PlayerAppearance look)
+        {
+            for (int i = 0; i < PlayerAppearance.ColorSlotCount; i++)
+                if (look.GetColor(i) == 0)
+                {
+                    int near = PlayerAppearance.NearestPaletteIndex(i);
+                    if (near > 0) look.SetColor(i, (byte)near);
+                }
         }
 
         /// <summary>
@@ -151,6 +227,9 @@ namespace SailwindPlayerModel
             _open = false;
             // Each step in its own try: _open is already false, so a throw here would skip the parchment
             // below, and a second ForceClose would return at once, leaving a blank paused screen.
+            // A name being typed is kept, as clicking away from it does, and the movement keys go back.
+            try { if (_renaming) FinishRename(true); _outfitAction = null; }
+            catch (System.Exception e) { Plugin.Log.LogWarning("[Character] Could not finish the outfit name: " + e.Message); }
             try { CharacterPreviewStudio.Close(); }   // the studio also self-destructs, but do not rely on that
             catch (System.Exception e) { Plugin.Log.LogWarning("[Character] Could not close the preview: " + e.Message); }
             // Commit on EVERY exit path, not just Done/Escape. The preview has already changed how the
@@ -190,7 +269,9 @@ namespace SailwindPlayerModel
                     Input.GetKeyDown(KeyCode.JoystickButton6))
                 {
                     _keyConsumedFrame = Time.frameCount;
-                    ForceClose();   // commits; see ForceClose
+                    // Typing an outfit's name, the key only backs out of the name.
+                    if (_renaming) FinishRename(false);
+                    else ForceClose();   // commits; see ForceClose
                 }
             }
             catch (System.Exception e)
@@ -312,6 +393,37 @@ namespace SailwindPlayerModel
             _button.normal.textColor = SailwindSkin.InkColor;
             _button.hover.textColor = SailwindSkin.ParchmentDark;
 
+            // Outfit rows: plain ink on the parchment, shaded under the mouse, and the picked one in the title band's
+            // colors. Clipped rather than wrapped, so a long name cannot push the column sideways.
+            if (_rowHoverTex == null)
+            {
+                Color shade = SailwindSkin.ParchmentDark;
+                shade.a = 0.25f;
+                _rowHoverTex = SailwindSkin.SolidTexture(shade);
+            }
+            _row = new GUIStyle(_label)
+            {
+                alignment = TextAnchor.MiddleLeft, clipping = TextClipping.Clip, padding = Offset(8, 8, 5, 5), margin = Offset(0, 0, 1, 1),
+            };
+            _row.normal.background = null;
+            _row.hover.background = _rowHoverTex;
+            _row.hover.textColor = SailwindSkin.InkColor;
+            _row.active.background = _rowHoverTex;
+            _row.active.textColor = SailwindSkin.InkColor;
+            _rowOn = new GUIStyle(_row);
+            _rowOn.normal.background = _titleTex;
+            _rowOn.normal.textColor = SailwindSkin.Parchment;
+            _rowOn.hover.background = _titleTex;
+            _rowOn.hover.textColor = SailwindSkin.Parchment;
+            _rowOn.active.background = _titleTex;
+            _rowOn.active.textColor = SailwindSkin.Parchment;
+
+            _field = new GUIStyle(stock.textField)
+            {
+                fontSize = (int)Px(19f), padding = Offset(6, 6, 5, 5), margin = Scaled(stock.textField.margin, s), clipping = TextClipping.Clip,
+            }.WithFont();
+
+            _outfitButtonW = Px(100f);
             _labelW = Px(130f);
             _valueW = Px(90f);
             _arrowW = Px(34f);
@@ -333,10 +445,12 @@ namespace SailwindPlayerModel
                         _valueW = Mathf.Max(_valueW, TextWidth(_label, option.Name) + slack);
                 }
                 // Describe's texts, and DescribeColor's for a color it cannot name.
-                foreach (var text in new[] { "Female", "Male", "None", "Default", "888 / 888" })
+                foreach (var text in new[] { "Female", "Male", "None", "Default", MatchTorsoText, "888 / 888" })
                     _valueW = Mathf.Max(_valueW, TextWidth(_label, text) + slack);
                 _randomW = Mathf.Max(_randomW, TextWidth(_button, "Randomize") + slack);
                 _doneW = Mathf.Max(_doneW, TextWidth(_button, DoneText) + slack);
+                foreach (var text in new[] { "Save new", "Update", "Rename", "Delete", ConfirmText })
+                    _outfitButtonW = Mathf.Max(_outfitButtonW, TextWidth(_button, text) + slack);
 
                 BuildSkin(stock, s);
             }
@@ -460,6 +574,7 @@ namespace SailwindPlayerModel
             if (!_stylesBuilt || Event.current.type == EventType.Layout) UpdateScale();
             // Scrollbars at this scale. IMGUI puts the stock skin back before the next OnGUI call, whoever makes it.
             if (_skin != null) GUI.skin = _skin;
+            RunOutfitAction();
 
             // The live customizer on our own body is the only honest source of "how many variants does
             // THIS machine have". No body yet (the world has only just loaded, or the build is still being
@@ -472,12 +587,22 @@ namespace SailwindPlayerModel
             if (customizer != null && !_normalized)
             {
                 _normalized = true; // tried once, so a failure cannot repeat on every OnGUI event
+                string beforeFit = _working.Serialize();
                 try
                 {
                     NormalizeWorking(customizer);
                     CharacterPreviewStudio.SetAppearance(_working);
                 }
                 catch (System.Exception e) { Plugin.Log.LogWarning("[Character] Could not fit the rows to your body: " + e.Message); }
+                // An outfit just put on is now as this rig wears it, so that is what counts as unedited. The same goes for
+                // a screen opened before the body existed, whose look has only just been fitted.
+                string fitted = _working.Serialize();
+                if (_baselinePending || beforeFit == _pickedBaseline)
+                {
+                    _baselinePending = false;
+                    _pickedBaseline = fitted;
+                }
+                if (beforeFit == _currentLook) _currentLook = fitted;
             }
 
             // Every size below is in 1080p pixels through Px, at the scale UpdateScale settled on. No GUI.matrix,
@@ -488,6 +613,9 @@ namespace SailwindPlayerModel
             float y = (Screen.height - h) * 0.5f;
 
             GUI.depth = 0;
+
+            // Where the column to the right of the preview starts; just past the panel when there is no preview yet.
+            float columnX = x + w + Screen.width * 0.03f;
 
             // The character, to the RIGHT of the controls. This is the studio mannequin, not the player's
             // real body - see CharacterPreviewStudio for why the real one cannot be used (its renderers are
@@ -514,6 +642,7 @@ namespace SailwindPlayerModel
                 float by = py + ph + gap;
                 if (GUI.Button(new Rect(px, by, pw * 0.48f, turnH), "< Turn", _button)) CharacterPreviewStudio.Turn(-25f);
                 if (GUI.Button(new Rect(px + pw * 0.52f, by, pw * 0.48f, turnH), "Turn >", _button)) CharacterPreviewStudio.Turn(25f);
+                columnX = px + pw + inset + gap;
             }
 
             GUILayout.BeginArea(new Rect(x, y, w, h), _panel);
@@ -537,8 +666,9 @@ namespace SailwindPlayerModel
                 }
                 _scroll = GUILayout.BeginScrollView(_scroll, GUILayout.ExpandHeight(true));
 
-                for (int i = 0; i < PlayerAppearance.SlotCount; i++)
+                foreach (int i in Order())
                 {
+                    if (PlayerAppearance.Slots[i].Key == FirstGearRow) GUILayout.Space(Px(10f));
                     int count = PlayerAppearance.VariantCount(customizer, i);
                     if (count <= 1) continue;   // nothing to choose between on this rig; do not show a dead row
                     // Vanilla has no female facial hair, so the row would be a control that visibly does
@@ -579,22 +709,7 @@ namespace SailwindPlayerModel
                     GUILayout.EndHorizontal();
                 }
 
-                // IMGUI scrolls a wheel notch by delta * 20 px whatever the row size, and the rows are _s times
-                // their 1080p height, so hand this scroll view the wheel delta times _s: a notch then moves the
-                // same number of rows at any scale. The raw delta goes back afterwards, used or not, so nothing
-                // later in this event sees the scaled one. At scale 1 the event is not touched.
-                var ev = Event.current;
-                bool wheel = ev != null && ev.type == EventType.ScrollWheel && _s != 1f;
-                Vector2 rawDelta = wheel ? ev.delta : Vector2.zero;
-                try
-                {
-                    if (wheel) ev.delta = rawDelta * _s;
-                    GUILayout.EndScrollView();
-                }
-                finally
-                {
-                    if (wheel) ev.delta = rawDelta;
-                }
+                EndScrollScaled();
             }
 
             GUILayout.Space(Px(8f));
@@ -609,9 +724,19 @@ namespace SailwindPlayerModel
                 for (int i = 1; i < PlayerAppearance.SlotCount; i++)
                 {
                     int n = PlayerAppearance.VariantCount(customizer, i);
+                    if (n <= 0) continue;
+                    // The rows added after the core ones are worn now and then rather than on every roll: a hood,
+                    // armor on every joint and a pack at once reads as a costume. Gloves keep to the torso half
+                    // the time.
+                    if (i >= PlayerAppearance.CoreSlotCount && Random.value > (PlayerAppearance.Slots[i].MatchesTorso ? 0.5f : 0.25f))
+                    {
+                        _working[i] = 0;
+                        continue;
+                    }
                     // NormalizeValue keeps each slot inside its OWN legal range, so only the slots that
                     // actually allow it can come out empty - a randomized character is never headless.
-                    if (n > 0) _working[i] = PlayerAppearance.NormalizeValue(i, n, Random.Range(0, n + 1));
+                    int lo = i >= PlayerAppearance.CoreSlotCount ? 1 : 0;
+                    _working[i] = PlayerAppearance.NormalizeValue(i, n, Random.Range(lo, n + 1));
                 }
                 for (int i = 0; i < PlayerAppearance.ColorSlotCount; i++)
                     _working.SetColor(i, (byte)Random.Range(1, PlayerAppearance.ColorSlots[i].Palette.Length + 1));
@@ -627,6 +752,302 @@ namespace SailwindPlayerModel
             }
             GUILayout.EndHorizontal();
             GUILayout.EndArea();
+
+            // Done above may just have closed the screen. Outfits need the body's part lists to fit a look to.
+            if (_open && customizer != null) DrawOutfits(columnX, y, h);
+        }
+
+        /// <summary>
+        /// IMGUI scrolls a wheel notch by delta * 20 px whatever the row size, and the rows are _s times their 1080p
+        /// height, so hand the scroll view the wheel delta times _s: a notch then moves the same number of rows at any
+        /// scale. The raw delta goes back afterwards, used or not, so nothing later in this event sees the scaled one.
+        /// At scale 1 the event is not touched.
+        /// </summary>
+        private static void EndScrollScaled()
+        {
+            var ev = Event.current;
+            bool wheel = ev != null && ev.type == EventType.ScrollWheel && _s != 1f;
+            Vector2 rawDelta = wheel ? ev.delta : Vector2.zero;
+            try
+            {
+                if (wheel) ev.delta = rawDelta * _s;
+                GUILayout.EndScrollView();
+            }
+            finally
+            {
+                if (wheel) ev.delta = rawDelta;
+            }
+        }
+
+        // ---- outfits -------------------------------------------------------------------------------------
+
+        /// <summary>
+        /// The column of saved outfits, in the free space to the right of the preview. Takes up nothing on the main panel
+        /// and scrolls past what fits, so there is no limit on how many. With no room for its buttons, as in a very narrow
+        /// window at a large UIScale, it is left out and the rest of the screen works as before.
+        /// </summary>
+        private static void DrawOutfits(float left, float y, float h)
+        {
+            float room = Screen.width - left - Px(16f);
+            float w = Mathf.Min(room, Px(300f));
+            float pad = _panel.padding.left + _panel.padding.right;
+            if (w < _outfitButtonW + pad)
+            {
+                if (!_columnHiddenLogged)
+                {
+                    _columnHiddenLogged = true;
+                    Plugin.Log.LogInfo($"[Character] No room for the outfits column at {Screen.width}x{Screen.height}, scale {_s:F2}.");
+                }
+                // A window resized while a name is being typed: there is no field left to type in or close.
+                if (_renaming && _outfitAction == null) _outfitAction = () => FinishRename(true);
+                return;
+            }
+
+            if (_confirm != OutfitConfirm.None && Time.unscaledTime > _confirmUntil && Event.current.type == EventType.Layout)
+                _confirm = OutfitConfirm.None;
+
+            var outfits = OutfitStore.Outfits;
+            GUILayout.BeginArea(new Rect(left, y, w, h), _panel);
+            GUILayout.Label("Outfits", _title);
+            GUILayout.Space(Px(8f));
+
+            // No sideways scrollbar: rows clip to the column.
+            var skin = _skin != null ? _skin : GUI.skin;
+            _outfitScroll = GUILayout.BeginScrollView(_outfitScroll, GUIStyle.none, skin.verticalScrollbar, GUILayout.ExpandHeight(true));
+            if (GUILayout.Button(CurrentLookText, _picked < 0 ? _rowOn : _row, GUILayout.ExpandWidth(true)))
+                _outfitAction = () => PutOnCurrentLook();
+            string worn = _working.Serialize();
+            for (int i = 0; i < outfits.Count; i++)
+            {
+                int index = i;
+                // A star on the picked one once it has been edited: Update would change it. In front, where a long name
+                // cannot clip it off.
+                string name = i == _picked && worn != _pickedBaseline ? "* " + outfits[i].Name : outfits[i].Name;
+                if (GUILayout.Button(name, i == _picked ? _rowOn : _row, GUILayout.ExpandWidth(true)))
+                    _outfitAction = () => PutOnOutfit(index);
+            }
+            EndScrollScaled();
+
+            GUILayout.Space(Px(8f));
+            if (_outfitTrouble) GUILayout.Label("Could not read or save the outfits file. The log has the reason.", _small);
+            if (_renaming) DrawNameEditor();
+            else DrawOutfitButtons(w - pad, worn);
+            GUILayout.EndArea();
+        }
+
+        /// <summary>Two buttons to a row where they fit, one above the other where they do not.</summary>
+        private static void DrawOutfitButtons(float room, string worn)
+        {
+            bool pair = room >= 2f * _outfitButtonW + _button.margin.left;
+            bool picked = _picked >= 0 && _picked < OutfitStore.Outfits.Count;
+            bool wasEnabled = GUI.enabled;
+
+            if (pair) GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Save new", _button, GUILayout.ExpandWidth(true))) _outfitAction = SaveNewOutfit;
+
+            GUI.enabled = wasEnabled && picked && worn != _pickedBaseline;
+            if (GUILayout.Button(_confirm == OutfitConfirm.Update ? ConfirmText : "Update", _button, GUILayout.ExpandWidth(true)))
+                _outfitAction = () => ConfirmThen(OutfitConfirm.Update, UpdatePickedOutfit);
+            GUI.enabled = wasEnabled;
+            if (pair)
+            {
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+            }
+
+            GUI.enabled = wasEnabled && picked;
+            if (GUILayout.Button("Rename", _button, GUILayout.ExpandWidth(true))) _outfitAction = () => StartRename(_picked);
+            if (GUILayout.Button(_confirm == OutfitConfirm.Delete ? ConfirmText : "Delete", _button, GUILayout.ExpandWidth(true)))
+                _outfitAction = () => ConfirmThen(OutfitConfirm.Delete, DeletePickedOutfit);
+            GUI.enabled = wasEnabled;
+            if (pair) GUILayout.EndHorizontal();
+        }
+
+        private static void DrawNameEditor()
+        {
+            var ev = Event.current;
+            if (ev.type == EventType.KeyDown && (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter))
+            {
+                ev.Use();
+                _outfitAction = () => FinishRename(true);
+            }
+            GUI.SetNextControlName(NameFieldControl);
+            _nameEdit = GUILayout.TextField(_nameEdit ?? "", OutfitStore.MaxNameLength, _field, GUILayout.ExpandWidth(true));
+            if (_focusName && ev.type == EventType.Repaint)
+            {
+                _focusName = false;
+                GUI.FocusControl(NameFieldControl);
+            }
+            if (GUILayout.Button("OK", _button, GUILayout.ExpandWidth(true))) _outfitAction = () => FinishRename(true);
+        }
+
+        /// <summary>Do the click the last event recorded. Layout events only, ahead of anything being placed.</summary>
+        private static void RunOutfitAction()
+        {
+            if (_outfitAction == null || Event.current.type != EventType.Layout) return;
+            var action = _outfitAction;
+            _outfitAction = null;
+            try { action(); }
+            catch (System.Exception e) { Plugin.Log.LogWarning("[Character] Outfit action failed: " + e.Message); }
+        }
+
+        /// <summary>
+        /// The first saved outfit that is the look being worn, or -1. Each is read the way Open reads a look, so one
+        /// spelled differently still matches; one with a part number past the end of a list does not, and simply is
+        /// not picked when the screen opens.
+        /// </summary>
+        private static int FindOutfitWorn()
+        {
+            string worn = _working.Serialize();
+            var outfits = OutfitStore.Outfits;
+            for (int i = 0; i < outfits.Count; i++)
+            {
+                var look = PlayerAppearance.Deserialize(outfits[i].Look);
+                look[0] = (byte)(look[0] == 2 ? 2 : 1);
+                FitColors(ref look);
+                if (look.Serialize() == worn) return i;
+            }
+            return -1;
+        }
+
+        // Update and Delete take a second click within a few seconds, because they cannot be taken back.
+        private static void ConfirmThen(OutfitConfirm kind, System.Action action)
+        {
+            if (_confirm == kind && Time.unscaledTime <= _confirmUntil)
+            {
+                _confirm = OutfitConfirm.None;
+                action();
+                return;
+            }
+            _confirm = kind;
+            _confirmUntil = Time.unscaledTime + ConfirmSeconds;
+        }
+
+        private static void PutOnOutfit(int index)
+        {
+            var outfits = OutfitStore.Outfits;
+            if (index < 0 || index >= outfits.Count) return;
+            if (_renaming) FinishRename(true);
+            _confirm = OutfitConfirm.None;
+            // Keep what is on unless it is already saved as the outfit picked, so it can be put back on.
+            string worn = _working.Serialize();
+            if (!PickedIsUnedited(worn)) _currentLook = worn;
+            _picked = index;
+            _baselinePending = true;
+            Wear(outfits[index].Look);
+        }
+
+        /// <summary>
+        /// Swap what is on with the look kept in the Current look row. Clicked again it swaps back, so whichever one the
+        /// player did not want is still a click away, and closing the screen keeps the one on show.
+        /// </summary>
+        private static void PutOnCurrentLook()
+        {
+            if (_renaming) FinishRename(true);
+            _confirm = OutfitConfirm.None;
+            string worn = _working.Serialize();
+            string back = _currentLook;
+            if (!PickedIsUnedited(worn)) _currentLook = worn;
+            _picked = -1;
+            _pickedBaseline = null;
+            _baselinePending = false;
+            if (!string.IsNullOrEmpty(back) && back != worn) Wear(back);
+        }
+
+        private static bool PickedIsUnedited(string worn)
+        {
+            return _picked >= 0 && _picked < OutfitStore.Outfits.Count && worn == _pickedBaseline;
+        }
+
+        private static void Wear(string look)
+        {
+            _working = PlayerAppearance.Deserialize(look);
+            _working[0] = (byte)(_working[0] == 2 ? 2 : 1);
+            FitColors(ref _working);
+            _dirty = true;
+            // The gender has to reach the body before anything is fitted to it: the male and female part lists differ
+            // in length, and folding against the old gender's would change a part the outfit saved. Preview writes it,
+            // and Draw folds right after this, as it does after a gender step.
+            Preview();
+            _normalized = false;
+        }
+
+        private static void SaveNewOutfit()
+        {
+            _confirm = OutfitConfirm.None;
+            var added = new OutfitStore.Outfit { Name = OutfitStore.NextName(), Look = _working.Serialize() };
+            OutfitStore.Outfits.Add(added);
+            _outfitTrouble = !OutfitStore.Save();
+            // By reference: the write can take in lines someone added to the file, which land after this one.
+            _picked = OutfitStore.Outfits.IndexOf(added);
+            _pickedBaseline = added.Look;
+            _baselinePending = false;
+            _outfitScroll.y = float.MaxValue;   // IMGUI clamps it to the end of the list
+            StartRename(_picked);
+        }
+
+        private static void UpdatePickedOutfit()
+        {
+            var outfits = OutfitStore.Outfits;
+            if (_picked < 0 || _picked >= outfits.Count) return;
+            outfits[_picked].Look = _working.Serialize();
+            _pickedBaseline = outfits[_picked].Look;
+            _baselinePending = false;
+            _outfitTrouble = !OutfitStore.Save();
+        }
+
+        private static void DeletePickedOutfit()
+        {
+            var outfits = OutfitStore.Outfits;
+            if (_picked < 0 || _picked >= outfits.Count) return;
+            outfits.RemoveAt(_picked);
+            _outfitTrouble = !OutfitStore.Save();
+            // What is on stays on, and the Current look row still holds the look from before this outfit was tried.
+            _picked = -1;
+            _pickedBaseline = null;
+            _baselinePending = false;
+        }
+
+        private static void StartRename(int index)
+        {
+            var outfits = OutfitStore.Outfits;
+            if (index < 0 || index >= outfits.Count) return;
+            _confirm = OutfitConfirm.None;
+            _nameEdit = outfits[index].Name;
+            _renaming = true;
+            _focusName = true;
+        }
+
+        /// <summary>End the name edit, keeping what was typed or not. An empty name keeps the old one.</summary>
+        private static void FinishRename(bool keep)
+        {
+            _renaming = false;
+            _focusName = false;
+            GUIUtility.keyboardControl = 0;
+            var outfits = OutfitStore.Outfits;
+            if (!keep || _picked < 0 || _picked >= outfits.Count) return;
+            string name = OutfitStore.CleanName(_nameEdit);
+            if (name.Length == 0 || name == outfits[_picked].Name) return;
+            outfits[_picked].Name = name;
+            _outfitTrouble = !OutfitStore.Save();
+        }
+
+        /// <summary>
+        /// Prefix on GameInput.GetKey, GetKeyDown and GetKeyUp (registered through GuardedPatches): no game key is down
+        /// while an outfit's name is typed. The scroll axis is left alone, since it is only a key if rebound to a letter.
+        /// Those readers do not check for a menu, and in co-op the world keeps running
+        /// behind this screen, so typing would walk the player around, jump, and turn a wheel or winch held through the
+        /// pause. Solo they would queue up instead, a jump latched for when the game resumes. The screen's own keys read
+        /// Input directly. A skipped patch only lets the letters through to the game.
+        /// </summary>
+        internal static class TypingHoldsGameKeys
+        {
+            internal static bool Prefix(ref bool __result)
+            {
+                if (!IsTyping) return true;
+                __result = false;
+                return false;
+            }
         }
 
         private static string Describe(int slot, int count)
@@ -637,8 +1058,12 @@ namespace SailwindPlayerModel
             // slots where it makes sense (Hat, Hair). On anatomy it deletes the body part: None on Torso
             // left a floating head, None on Head made the player disappear outright.
             int v = _working[slot];
-            return v == 0 ? "None" : v + " / " + count;
+            if (v == 0) return PlayerAppearance.Slots[slot].MatchesTorso ? MatchTorsoText : "None";
+            return v + " / " + count;
         }
+
+        // Gloves at 0: the hands the torso comes with, which is how every body was drawn before the row existed.
+        private const string MatchTorsoText = "Match torso";
 
         /// <summary>Cycle a color slot through its palette, wrapping at both ends.</summary>
         private static void StepColor(int slot, int dir)

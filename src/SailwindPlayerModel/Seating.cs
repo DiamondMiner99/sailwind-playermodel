@@ -19,6 +19,7 @@ namespace SailwindPlayerModel
         public static ConfigEntry<bool> ShowBodyWhenSeated { get; private set; }
         public static ConfigEntry<float> BodyFadeBelowShoulders { get; private set; }
         public static ConfigEntry<float> BodyFadeAboveHips { get; private set; }
+        public static ConfigEntry<bool> ArmsOnTables { get; private set; }
 
         public static void Bind(ConfigFile cfg)
         {
@@ -40,6 +41,8 @@ namespace SailwindPlayerModel
                 new ConfigDescription("Where your seated body is fully see-through, in meters below the shoulders.", new AcceptableValueRange<float>(-0.2f, 0.6f)));
             BodyFadeAboveHips = cfg.Bind(Section, "BodyFadeAboveHips", 0f,
                 new ConfigDescription("Where your seated body is fully solid, in meters above the hip joints. Everything lower shows completely.", new AcceptableValueRange<float>(-0.3f, 0.5f)));
+            ArmsOnTables = cfg.Bind(Section, "ArmsOnTables", true,
+                "Sitting with your feet down at a table, a hand with nothing to hold rests on the tabletop instead of your thigh. Seen in third person; in first person your arms are hidden while you sit.");
         }
     }
 
@@ -120,6 +123,15 @@ namespace SailwindPlayerModel
             public bool Walk;       // on the boat's walking copy, and brought back to the visible boat
         }
 
+        // The table in front of the seat, if any: the middle of its near edge and its up, in the frame of what it is
+        // part of, found by ProbeTable. The item it is, when it is one, so picking it up drops it.
+        private Transform _tableFrame;
+        private Vector3 _tableLocalEdge, _tableLocalUp;
+        private PickupableItem _tableItem;
+        private float _nextTableProbe;
+        private const float TableProbeSeconds = 0.5f;
+        private const float TableMinAboveSeat = 0.08f, TableMaxAboveSeat = 0.5f;
+
         private struct SparShape
         {
             public Vector3 Center;  // the crown, halfway across
@@ -155,6 +167,9 @@ namespace SailwindPlayerModel
         private Vector3 _riseFrom;
         private bool _controlTaken;
         private bool _holdingFromSeat;   // working a tiller, a stock control in reach, or another mod's control while seated
+        // That hold reads the movement keys, so they do not stand the player up. One held with the mouse does not read them,
+        // and the game can miss its release (a camera key or a menu while the button is down), so the keys stay live there.
+        private bool _holdUsesKeys;
         // The stock wheel, winch or pump latched as worked from this seat, and how long its handles have been past
         // the outer band. The latch is on the control itself, so a heeling boat or a wheel turning under the hands
         // never re-decides the seat; only letting go, taking another control, or a new sit does.
@@ -183,6 +198,11 @@ namespace SailwindPlayerModel
         // Farthest round from the seat's facing a control may be and still be worked from it: the seated turn plus
         // about 70 degrees of natural sideways reach. Past that the arms would have to go behind the back.
         private const float MaxOffFacingDeg = 100f;
+        // A control behind a ledge seat is turned to only if it is about this much past the reach. Measured before the
+        // turn, which can move the hips across the ledge; the reach test after the turn has the last word.
+        private const float TurnToControlSlackMeters = 0.5f;
+        // A seat turned on the spot leaves this much of MaxOffFacingDeg spare, so a little heel does not undo it at once.
+        private const float TurnedFacingMarginDeg = 10f;
         // The same slack for the facing as for the distance: a seat that turns under the player (a crate on a heeling
         // deck, a chair sliding round) has to carry the control this far past it before the seat ends.
         private const float FacingSlackDeg = 15f;
@@ -271,6 +291,21 @@ namespace SailwindPlayerModel
         }
 
         /// <summary>
+        /// The table in front of the local player's seat: the middle of its near edge and the way its top faces. False
+        /// when not sitting with the feet down, with no table found, or with ArmsOnTables off.
+        /// </summary>
+        public static bool TryGetTable(out Vector3 edge, out Vector3 up)
+        {
+            edge = up = Vector3.zero;
+            var me = Instance;
+            if (me == null || me._seat == null || me._tableFrame == null || me._seat.Pose != SeatPose.FeetDown) return false;
+            if (SeatingTuning.ArmsOnTables == null || !SeatingTuning.ArmsOnTables.Value) return false;
+            edge = me._tableFrame.TransformPoint(me._tableLocalEdge);
+            up = me._tableFrame.TransformDirection(me._tableLocalUp).normalized;
+            return true;
+        }
+
+        /// <summary>
         /// Where the local player lies in one of the game's beds: the head, the direction the feet point along the
         /// bed, and the direction the chest faces. False when not in a bed.
         ///
@@ -342,21 +377,23 @@ namespace SailwindPlayerModel
                     Plugin.Log.LogInfo("[Seating] took the controls back: handed back while sitting");
                 }
                 // Working a tiller or another mod's control from the seat uses the movement keys, so they do not stand you up then.
-                if (keys && !_holdingFromSeat && (GameInput.GetKeyDown(InputName.MoveUp) || GameInput.GetKeyDown(InputName.MoveDown) ||
+                if (keys && !_holdUsesKeys && (GameInput.GetKeyDown(InputName.MoveUp) || GameInput.GetKeyDown(InputName.MoveDown) ||
                              GameInput.GetKeyDown(InputName.MoveLeft) || GameInput.GetKeyDown(InputName.MoveRight) ||
                              GameInput.GetKeyDown(InputName.Jump)))
                 {
                     StandUp(true);
                     return;
                 }
-                if (keys && !_holdingFromSeat && SitKeyDown())
+                if (keys && !_holdUsesKeys && SitKeyDown())
                 {
                     if (_seat.Spar) ToggleSpar();
                     else if (_seat.Edge) TrySwingLegs();
                     else if (_seat.Floor) NextFloorPose();
                 }
+                if (_seat != null) WatchTable();
                 if (_seat != null)
                 {
+                    ClearCrouch();
                     // Whatever held the controls during the seat handed them back a frame ago or more: take the camera's place
                     // on its mount again, wherever that left it (Three Sheets' physical fall leaves it 0.3 m down), so the
                     // view is back at the seat.
@@ -376,15 +413,41 @@ namespace SailwindPlayerModel
         /// <summary>
         /// Whether the sit key went down this frame. Read from the keyboard the way the camera keys are, since
         /// this is a key pressed with the movement keys held, which is what KeyboardShortcut.IsDown refuses.
+        ///
+        /// The game's own crouch key wins if the two are the same key. The game toggles crouching on every press,
+        /// sitting or not, so sharing a key sat the player down on what they meant as a crouch, and a press made on
+        /// the seat left them crouched when they stood, with no key that seemed to undo it.
         /// </summary>
-        private static bool SitKeyDown()
+        private bool SitKeyDown()
         {
             KeyboardShortcut shortcut = SeatingTuning.SitKey.Value;
             KeyCode main = shortcut.MainKey;
             if (main == KeyCode.None || !Input.GetKeyDown(main)) return false;
             foreach (KeyCode k in shortcut.Modifiers)
                 if (!Input.GetKey(k)) return false;
+            if (main == GameInput.GetKeyCode(InputName.Crouch, false, false) || main == GameInput.GetKeyCode(InputName.Crouch, true, false))
+            {
+                if (!_sitKeyClashSaid)
+                {
+                    _sitKeyClashSaid = true;
+                    Hint("The sit key is also your crouch key. Set a different SitKey in the F1 menu.");
+                }
+                return false;
+            }
             return true;
+        }
+
+        private bool _sitKeyClashSaid;
+        private PlayerCrouching _crouching;
+
+        /// <summary>
+        /// Not crouching. The game keeps toggling its crouch while the player sits, and the seat ignores it, so without this a
+        /// crouch key pressed on the seat only shows on standing up.
+        /// </summary>
+        private void ClearCrouch()
+        {
+            if (_crouching == null && Refs.ovrCameraRig != null) _crouching = Refs.ovrCameraRig.GetComponent<PlayerCrouching>();
+            if (_crouching != null) CrouchingRef(_crouching) = false;
         }
 
         /// <summary>
@@ -507,12 +570,12 @@ namespace SailwindPlayerModel
             bool tiller = kind == InteractionKind.Helm && RotorSpecs.IsTiller(control);
             var sticky = LocalInteraction.StickyControl(LocalInteraction.Pointer);
             bool modded = kind == InteractionKind.None && sticky != null && sticky.isActiveAndEnabled;
-            // A stock control is worked from the seat only on a sticky click. Held with the mouse instead (the game's
-            // steer-with-mouse and winches-with-mouse settings) the game keeps it in clickedButton and turns mouse
-            // look off, so there is no sticky control, this fails, and the player stands at once as they did before.
+            // A stock control is held on a sticky click or, under the game's steer-with-mouse and winches-with-mouse
+            // settings, with the button down, where the game keeps it in clickedButton. Both are worked from the seat.
+            var held = sticky != null ? sticky : LocalInteraction.ClickedControl(LocalInteraction.Pointer);
             bool stock = false;
             if (!tiller && !modded && (kind == InteractionKind.Helm || kind == InteractionKind.Crank)
-                && sticky != null && sticky.isActiveAndEnabled && sticky.transform == control)
+                && held != null && held.isActiveAndEnabled && held.transform == control)
             {
                 if (control == _seatedControl) stock = true;
                 else if (TakeControlFromSeat(control)) { _seatedControl = control; _outOfReachFor = 0f; stock = true; }
@@ -532,6 +595,7 @@ namespace SailwindPlayerModel
                 Plugin.Log.LogInfo(tiller ? "[Seating] steering a tiller from the seat" : "[Seating] working '" + sticky.name + "' from the seat");
             }
             _holdingFromSeat = hold;
+            _holdUsesKeys = hold && sticky != null;
         }
 
         /// <summary>
@@ -554,6 +618,15 @@ namespace SailwindPlayerModel
                 Plugin.Log.LogInfo("[Seating] took a control: no body to measure the reach from");
                 return false;
             }
+            // Behind the seat but near enough: the body turns to the control rather than getting up for it.
+            if (offFacing > MaxOffFacingDeg && need <= limit + TurnToControlSlackMeters && TurnSeatToward(control))
+            {
+                if (!MeasureSeatedReach(control, out need, out limit, out offFacing))
+                {
+                    Plugin.Log.LogInfo("[Seating] took a control: no body to measure the reach from");
+                    return false;
+                }
+            }
             _lastNeed = need;
             _lastOffFacing = offFacing;
             if (need > limit)
@@ -568,6 +641,65 @@ namespace SailwindPlayerModel
             }
             Plugin.Log.LogInfo($"[Seating] working {ControlName(control)} from the seat: grip {need:F2} m away, reach {limit:F2} m");
             return true;
+        }
+
+        /// <summary>
+        /// Turn a ledge seat toward a control behind it: the legs swing over to the far side if there is one, as the sit
+        /// key does, and otherwise the body turns on the spot to the nearest facing the control can be worked from. The view
+        /// stays where it is, because the player is already looking at what they just took hold of. Chairs and spars stay
+        /// as they are: they have one way to face. True if the seat moved.
+        /// </summary>
+        private bool TurnSeatToward(Transform control)
+        {
+            var s = _seat;
+            if (s == null || !s.Edge || s.Spar || s.Floor) return false;
+            float need, limit, offFacing;
+            bool swung = TrySwingLegs(false);
+            if (swung)
+            {
+                Plugin.Log.LogInfo($"[Seating] swung round to face {ControlName(control)}");
+                if (MeasureSeatedReach(control, out need, out limit, out offFacing) && need <= limit && offFacing <= MaxOffFacingDeg)
+                    return true;
+            }
+
+            var body = PlayerModel.Body;
+            Vector3 hips, forward;
+            SeatPose pose;
+            float floorY;
+            if (body == null || !TryGetSeat(out hips, out forward, out pose, out floorY)) return swung;
+            Vector3 toControl = Flat(control.position - hips);
+            float side = toControl.sqrMagnitude > 1e-4f && Vector3.SignedAngle(forward, toControl, Vector3.up) < 0f ? -1f : 1f;
+            // Tried against the reach test itself, which measures to where the hand ends up rather than to the control's
+            // center. From 30 degrees: anything less the body takes for the boat turning under it and snaps to at once.
+            for (float turn = 30f; turn <= 180f; turn += 15f)
+                for (int way = 0; way < 2; way++)
+                {
+                    float signed = way == 0 ? side * turn : -side * turn;
+                    Vector3 facing = Quaternion.AngleAxis(signed, Vector3.up) * forward;
+                    if (!body.TryMeasureSeatedReach(control, hips, facing, out need, out limit, out offFacing)) return swung;
+                    if (need > limit || offFacing > MaxOffFacingDeg - TurnedFacingMarginDeg) continue;
+                    Reface(forward, facing, false);
+                    s.LocalForward = s.Anchor.InverseTransformDirection(facing);
+                    ProbeLegsAfterTurn(s, facing);
+                    Plugin.Log.LogInfo($"[Seating] turned {signed:F0} degrees on the seat toward {ControlName(control)}");
+                    return true;
+                }
+            return swung;
+        }
+
+        /// <summary>
+        /// The legs for a seat that has turned on the spot: down to what is now in front of it, or hanging where nothing
+        /// is in reach. Where the ledge itself carries on that way there is nothing new to go by, so they stay as they were.
+        /// </summary>
+        private void ProbeLegsAfterTurn(Seat s, Vector3 facing)
+        {
+            Vector3 surface = s.Anchor.TransformPoint(s.LocalSurface);
+            Hit floor;
+            bool hit = RaycastDown(surface + facing * 0.45f + Vector3.up * 0.02f, 6f, s.Ignore, out floor);
+            float below = hit ? surface.y - floor.Point.y : 99f;
+            if (below < 0.15f) return;
+            s.Pose = below > LegReach ? SeatPose.Dangle : SeatPose.FeetDown;
+            s.FloorBelow = Mathf.Min(below, 6f);
         }
 
         /// <summary>
@@ -1151,7 +1283,11 @@ namespace SailwindPlayerModel
         /// On a rail or a narrow ledge, swing the legs over to the other side. Standing up still returns the
         /// player to the side they sat down from, so this can never put them overboard.
         /// </summary>
-        private void TrySwingLegs()
+        /// <summary>
+        /// Swing the legs over to the far side of a ledge. <paramref name="pressed"/> is the sit key's own swing, which says
+        /// why it could not and turns the view with the body. False if there is no far side to swing to.
+        /// </summary>
+        private bool TrySwingLegs(bool pressed = true)
         {
             var s = _seat;
             Vector3 surface = s.Anchor.TransformPoint(s.LocalSurface);
@@ -1159,31 +1295,41 @@ namespace SailwindPlayerModel
             Vector3 back = -forward;
 
             Vector3 far;
-            if (!FindEdge(surface, back, 0.6f, out far)) { Hint("Too wide to swing your legs over."); return; }
+            if (!FindEdge(surface, back, 0.6f, out far))
+            {
+                if (pressed) Hint("Too wide to swing your legs over.");
+                return false;
+            }
             Vector3 near = s.Anchor.TransformPoint(s.LocalEdge);
             float width = Vector3.Distance(Flat3(near), Flat3(far));
             Vector3 newSurface = width < 2f * HipSetback + 0.06f
                 ? new Vector3((near.x + far.x) * 0.5f, surface.y, (near.z + far.z) * 0.5f)
                 : SeatBack(far, back, surface.y);
-            if (!HasHeadroom(newSurface, s.Ignore)) { Hint("No room to swing your legs over."); return; }
+            if (!HasHeadroom(newSurface, s.Ignore))
+            {
+                if (pressed) Hint("No room to swing your legs over.");
+                return false;
+            }
 
             Hit floor;
             float below = RaycastDown(far + back * 0.30f + Vector3.up * 0.02f, 6f, s.Ignore, out floor) ? surface.y - floor.Point.y : 99f;
 
-            Reface(forward, back);
+            Reface(forward, back, pressed);
             s.LocalSurface = s.Anchor.InverseTransformPoint(newSurface);
             s.LocalForward = s.Anchor.InverseTransformDirection(back);
             s.LocalEdge = s.Anchor.InverseTransformPoint(far);
             s.Pose = below > LegReach ? SeatPose.Dangle : SeatPose.FeetDown;
             s.FloorBelow = Mathf.Min(below, 6f);
             Plugin.Log.LogInfo($"[Seating] swung legs over, {(s.Pose == SeatPose.Dangle ? "dangling" : "feet down")} ({below:F2} m to the floor)");
+            return true;
         }
 
         /// <summary>
-        /// The seat now faces another way: ease the view round by the same turn, on top of wherever the player is
-        /// looking, and ease the eye over to the new seat point. A half turn goes back the way the last one came.
+        /// The seat now faces another way: ease the eye over to the new seat point, and unless <paramref name="turnView"/>
+        /// is false ease the view round by the same turn, on top of wherever the player is looking. A half turn goes back
+        /// the way the last one came.
         /// </summary>
-        private void Reface(Vector3 from, Vector3 to)
+        private void Reface(Vector3 from, Vector3 to, bool turnView = true)
         {
             float turn = Vector3.SignedAngle(from, to, Vector3.up);
             if (Mathf.Abs(turn) > 150f)
@@ -1192,7 +1338,8 @@ namespace SailwindPlayerModel
                 turn = _swingSign > 0f ? round : round - 360f;
                 _swingSign = -_swingSign;
             }
-            _turnGoal += turn;
+            if (turnView) _turnGoal += turn;
+            ForgetTable();   // the table was found from the old facing; look again from the new one
             Transform observer = Refs.observerMirror.transform;
             _startEyeLocal = _seat.Anchor.InverseTransformPoint(EyeWorld(observer));
             _sitTime = Time.time;
@@ -1211,6 +1358,7 @@ namespace SailwindPlayerModel
 
             Transform observer = Refs.observerMirror.transform;
             _seat = s;
+            ForgetTable();
             _sitTime = Time.time;
             TakeSeatEye(observer);
             _startEyeLocal = s.Anchor.InverseTransformPoint(EyeWorld(observer));
@@ -1230,11 +1378,7 @@ namespace SailwindPlayerModel
             _frozenLocal = controller.localPosition;
             _frozenFromAnchor = controller.position - s.Anchor.position;
             s.AboardBoat = GameState.currentBoat;
-            if (Refs.ovrCameraRig != null)
-            {
-                var crouch = Refs.ovrCameraRig.GetComponent<PlayerCrouching>();
-                if (crouch != null) CrouchingRef(crouch) = false;
-            }
+            ClearCrouch();
             Plugin.Log.LogInfo($"[Seating] sat on {what}: {PoseName(s.Pose)} ({s.FloorBelow:F2} m to the floor)");
         }
 
@@ -1720,6 +1864,106 @@ namespace SailwindPlayerModel
             return p != null ? p.GetComponentInParent<BoatRefs>() : null;
         }
 
+        private void ForgetTable()
+        {
+            _tableFrame = null;
+            _tableItem = null;
+            _nextTableProbe = 0f;
+        }
+
+        /// <summary>Look for a table again twice a second, and drop one that was picked up or went away.</summary>
+        private void WatchTable()
+        {
+            if (_tableFrame != null && (!_tableFrame.gameObject.activeInHierarchy || (_tableItem != null && _tableItem.held != null)))
+                _tableFrame = null;
+            if (Time.unscaledTime < _nextTableProbe) return;
+            _nextTableProbe = Time.unscaledTime + TableProbeSeconds;
+            if (_seat.Pose != SeatPose.FeetDown || SeatingTuning.ArmsOnTables == null || !SeatingTuning.ArmsOnTables.Value)
+            {
+                _tableFrame = null;
+                return;
+            }
+            try { ProbeTable(); }
+            catch (System.Exception e)
+            {
+                _tableFrame = null;
+                Plugin.Log.LogWarning("[Seating] looking for a table failed: " + e.Message);
+            }
+        }
+
+        /// <summary>
+        /// A level top in front of the seat, between TableMinAboveSeat and TableMaxAboveSeat above it: a 2 by 6 grid of
+        /// rays straight down ahead of the hips, in both copies of a boat. The height most of them agree on wins, so a
+        /// mug or a lantern on the table does not, and at least three must agree. Its near edge is then walked back to
+        /// in 2 cm steps.
+        /// </summary>
+        private void ProbeTable()
+        {
+            Vector3 hips, fwd; SeatPose pose; float floorY;
+            if (!TryGetSeat(out hips, out fwd, out pose, out floorY)) { _tableFrame = null; return; }
+            Vector3 right = Vector3.Cross(Vector3.up, fwd);
+            float seatY = hips.y - HipAboveSurface;
+            Transform ignore = _seat.Ignore != null ? _seat.Ignore : (_seat.Item != null ? _seat.Item.transform : null);
+
+            const int Rows = 6;
+            var heights = new float[Rows * 2];
+            var hits = new Hit[Rows * 2];
+            var have = new bool[Rows * 2];
+            for (int r = 0; r < Rows; r++)
+                for (int side = 0; side < 2; side++)
+                {
+                    int k = r * 2 + side;
+                    Vector3 origin = hips + fwd * (0.25f + 0.1f * r) + right * (side == 0 ? -0.18f : 0.18f);
+                    origin.y = seatY + TableMaxAboveSeat + 0.3f;
+                    Hit h;
+                    if (!RaycastDown(origin, 0.3f + TableMaxAboveSeat - TableMinAboveSeat + 0.05f, ignore, out h)) continue;
+                    float above = h.Point.y - seatY;
+                    if (h.Normal.y < 0.9f || above < TableMinAboveSeat || above > TableMaxAboveSeat) continue;
+                    heights[k] = above; hits[k] = h; have[k] = true;
+                }
+
+            // The height the most hits share, within 3 cm.
+            int bestCount = 0; float bestHeight = 0f;
+            for (int i = 0; i < heights.Length; i++)
+            {
+                if (!have[i]) continue;
+                int n = 0;
+                for (int j = 0; j < heights.Length; j++)
+                    if (have[j] && Mathf.Abs(heights[j] - heights[i]) <= 0.03f) n++;
+                if (n > bestCount) { bestCount = n; bestHeight = heights[i]; }
+            }
+            if (bestCount < 3) { _tableFrame = null; _tableItem = null; return; }
+
+            // The nearest row on that top, then back toward the seat until the top ends.
+            int nearest = -1;
+            for (int i = 0; i < heights.Length; i++)
+                if (have[i] && Mathf.Abs(heights[i] - bestHeight) <= 0.03f && (nearest < 0 || i / 2 < nearest / 2)) nearest = i;
+            float along = 0.25f + 0.1f * (nearest / 2);
+            Hit top = hits[nearest];
+            for (float d = along - 0.02f; d > 0.1f; d -= 0.02f)
+            {
+                Vector3 origin = hips + fwd * d;
+                origin.y = seatY + bestHeight + 0.1f;
+                Hit h;
+                if (!RaycastDown(origin, 0.2f, ignore, out h) || Mathf.Abs(h.Point.y - seatY - bestHeight) > 0.03f) break;
+                along = d;
+            }
+
+            Vector3 edge = hips + fwd * along;
+            edge.y = seatY + bestHeight;
+            // Hold it in the frame of what it is part of: the table itself when it can be seen here, else the visible
+            // boat a walking copy hit was brought back to.
+            Transform frame = top.Walk ? Refs.observerMirror.transform.parent : top.Collider.transform;
+            if (frame == null) { _tableFrame = null; return; }
+            bool wasNone = _tableFrame == null;
+            _tableFrame = frame;
+            _tableLocalEdge = frame.InverseTransformPoint(edge);
+            _tableLocalUp = frame.InverseTransformDirection(top.Normal);
+            _tableItem = top.Walk ? null : top.Collider.GetComponentInParent<PickupableItem>();
+            if (wasNone)
+                Plugin.Log.LogInfo($"[Seating] table in front: {Describe(top)}, {bestHeight:F2} m above the seat, edge {along:F2} m ahead");
+        }
+
         private static string Describe(Hit h)
         {
             var c = h.Collider;
@@ -1940,22 +2184,35 @@ namespace SailwindPlayerModel
                 _labelStyle.padding = new RectOffset(SailwindSkin.Px(stock.padding.left, s), SailwindSkin.Px(stock.padding.right, s),
                     SailwindSkin.Px(stock.padding.top, s), SailwindSkin.Px(stock.padding.bottom, s));
                 _labelStyle.normal.textColor = Color.white;
+                // Copied from the shared skin, which another mod can have changed: a label given a background there
+                // would come through here.
+                _labelStyle.normal.background = null;
+                _labelStyle.hover.background = null;
+                _labelStyle.active.background = null;
+                _labelStyle.focused.background = null;
                 _labelScale = s;
             }
             var old = GUI.color;
-            var rect = new Rect(0f, Screen.height - SailwindSkin.Px(64f, s), Screen.width, SailwindSkin.Px(28f, s));
+            float y = Screen.height - SailwindSkin.Px(64f, s), h = SailwindSkin.Px(28f, s);
             if (hint)
             {
                 GUI.color = new Color(1f, 1f, 1f, 0.8f);
-                GUI.Label(rect, _hint, _labelStyle);
-                rect.y -= SailwindSkin.Px(26f, s);
+                GUI.Label(CenteredLine(_hint, y, h, s), _hint, _labelStyle);
+                y -= SailwindSkin.Px(26f, s);
             }
             if (seated)
             {
                 GUI.color = new Color(1f, 1f, 1f, 0.45f);
-                GUI.Label(rect, "(seated)", _labelStyle);
+                GUI.Label(CenteredLine("(seated)", y, h, s), "(seated)", _labelStyle);
             }
             GUI.color = old;
+        }
+
+        // One line of text, centered and only as wide as it is.
+        private Rect CenteredLine(string text, float y, float h, float s)
+        {
+            float w = Mathf.Min(Screen.width, _labelStyle.CalcSize(new GUIContent(text)).x + SailwindSkin.Px(8f, s));
+            return new Rect((Screen.width - w) * 0.5f, y, w, h);
         }
     }
 

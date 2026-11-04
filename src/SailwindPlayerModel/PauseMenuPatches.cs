@@ -149,13 +149,14 @@ namespace SailwindPlayerModel
         }
 
         // Settings sub-page "Back": if it was opened from our pause menu, return to our panel instead of
-        // unpausing. (__0 is the StartMenuButtonType argument, named positionally so it is name-agnostic.)
+        // unpausing. Quit in our confirmation on the press-F screen, where vanilla ignores the click. (__0 is the
+        // StartMenuButtonType argument, named positionally so it is name-agnostic.)
         [HarmonyPatch(typeof(StartMenu), "ButtonClick", new[] { typeof(StartMenuButtonType) })]
         public static class ButtonClickPatch
         {
             static bool Prefix(StartMenu __instance, StartMenuButtonType __0)
             {
-                return !ModPauseMenu.OnSettingsBack(__instance, __0);
+                return !ModPauseMenu.OnSettingsBack(__instance, __0) && !ModPauseMenu.OnQuitHeldOff(__instance, __0);
             }
         }
 

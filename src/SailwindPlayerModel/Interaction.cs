@@ -34,6 +34,7 @@ namespace SailwindPlayerModel
         public static ConfigEntry<float> SeatedReach { get; private set; }
         public static ConfigEntry<float> SeatedLeanDegrees { get; private set; }
         public static ConfigEntry<float> SeatedTurnDegrees { get; private set; }
+        public static ConfigEntry<bool> SeatedWheelOneHand { get; private set; }
         public static ConfigEntry<bool> TurnToFace { get; private set; }
         public static ConfigEntry<float> ElbowDown { get; private set; }
         public static ConfigEntry<float> ElbowOut { get; private set; }
@@ -58,8 +59,10 @@ namespace SailwindPlayerModel
                 new ConfigDescription("Farthest the body moves to stand at a control, closer or farther, in meters. Standing at a tiller, the body can move farther to the side so the swinging tiller does not pass through it. 0 turns this off.",
                     new AcceptableValueRange<float>(0f, 2f)));
             SeatedReach = cfg.Bind(Section, "SeatedReach", 0.95f,
-                new ConfigDescription("How much of your arm's reach counts as within reach while sitting. A wheel, winch or pump this close to the seat is worked sitting down; anything farther stands you up to it. The distance counted is to the farthest point your hands are carried to, so a wheel is measured with its handles hard over and a pump at the far side of its stroke.",
+                new ConfigDescription("How much of your arm's reach counts as within reach while sitting. A wheel, winch or pump this close to the seat is worked sitting down; anything farther stands you up to it. The distance counted is to the farthest point your hands are carried to, so a wheel is measured with its handle at the end of the hand's swing and a pump at the far side of its stroke.",
                     new AcceptableValueRange<float>(0.6f, 1.1f)));
+            SeatedWheelOneHand = cfg.Bind(Section, "SeatedWheelOneHand", true,
+                "Sitting at the ship's wheel, steer with whichever hand has the shorter reach and keep the other on your thigh, which works from farther away. Off, both hands go on the wheel as they do standing, and the seat has to be close enough for both.");
             SeatedLeanDegrees = cfg.Bind(Section, "SeatedLeanDegrees", 25f,
                 new ConfigDescription("How far you lean off the seat toward a wheel or winch you are working, in degrees. Leaning also counts toward what you can reach, so 0 keeps the seat only where your arms reach sitting upright.",
                     new AcceptableValueRange<float>(0f, 40f)));

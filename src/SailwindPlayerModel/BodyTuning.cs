@@ -95,7 +95,7 @@ namespace SailwindPlayerModel
                     new AcceptableValueRange<float>(0.5f, 2.5f)));
 
             Appearance = cfg.Bind(SecAppearance, "Character", "",
-                "Your character's appearance, as \"slot=variant\" pairs (e.g. \"gender=1;hair=3;torso=7\"). Normally written by the Character screen in the pause menu rather than edited here. Gender 2 is female and anything else is male. A variant past the end of a slot's list wraps around to the start. 0 means none on hair and headgear, and wraps to the last variant on the other slots. The color slots (c_skin, c_hair, c_primary, c_secondary, c_leather, c_metal) pick from each color list, and 0 or a number past the end of the list keeps the color the game's NPC wears. Unknown slot names are ignored, and a hand-edited value cannot produce an invisible or broken character.");
+                "Your character's appearance, as \"slot=variant\" pairs (e.g. \"gender=1;hair=3;torso=7\"). Normally written by the Character screen in the pause menu rather than edited here. Gender 2 is female and anything else is male. A variant past the end of a slot's list wraps around to the start. 0 means none on hair, headgear, hood, face, back, shoulders, elbows, knees and belt, means the torso's own on gloves, and wraps to the last variant on the other slots. The color slots (c_skin, c_hair, c_primary, c_secondary, c_leather, c_metal) pick from each color list, and 0 or a number past the end of the list keeps the color the game's NPC wears. Unknown slot names are ignored, and a hand-edited value cannot produce an invisible or broken character.");
         }
     }
 }

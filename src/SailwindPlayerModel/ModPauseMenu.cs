@@ -268,7 +268,8 @@ namespace SailwindPlayerModel
                     // Open the dialog directly, as Settings and Recover do. ButtonClick(QuitMenu) ignores the
                     // click while vanilla's animsPlaying counter is held (the press-F prompt after a load holds
                     // it), and hiding the panel first left nothing on screen. The dialog's own Quit still goes
-                    // through ButtonClick, so the save on quit and any mod hooked on it run as before.
+                    // through ButtonClick, so the save on quit and any mod hooked on it run as before; while the
+                    // counter is held, OnQuitHeldOff does vanilla's quit in its place.
                     try { InvokeStartMenu("EnableQuitConfirmMenu"); }
                     catch (Exception e) { Plugin.Log.LogWarning("[PauseMenu] Could not open the quit confirmation: " + e.Message); }
                     if (SubPanelActive("confirmQuitUI")) Hide();
@@ -635,6 +636,25 @@ namespace SailwindPlayerModel
             if (SubPanelActive("chooseIslandUI") || SubPanelActive("saveSlotUI")) return false;
             if (!AnySubPageActive()) return false;
             ReturnToPanelFromSubPage();
+            return true;
+        }
+
+        /// <summary>
+        /// Quit in the confirmation our Quit Game button opened, while vanilla's animsPlaying counter is held. The press-F
+        /// prompt after a load holds it until F is pressed, and ButtonClick ignores every click while it is held, so the
+        /// dialog's Quit did nothing there. Runs vanilla's own quit (save if a save is allowed, then quit). Returns true if
+        /// it handled the click; any other time vanilla's ButtonClick does it as before.
+        /// </summary>
+        public static bool OnQuitHeldOff(MonoBehaviour startMenu, StartMenuButtonType button)
+        {
+            _startMenu = startMenu;
+            if (button != StartMenuButtonType.Quit || !SubPageFromPause || !SubPanelActive("confirmQuitUI")) return false;
+            int held;
+            try { held = Traverse.Create(startMenu).Field("animsPlaying").GetValue<int>(); } catch { return false; }
+            if (held <= 0) return false;
+            Plugin.Log.LogInfo("[PauseMenu] Quit while the start screen holds the menu; quitting as the game would");
+            if (SaveLoadManager.readyToSave) SaveLoadManager.instance.SaveGame(compressed: true);
+            Application.Quit();
             return true;
         }
 

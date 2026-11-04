@@ -17,13 +17,16 @@ namespace SailwindPlayerModel
         public static ConfigEntry<bool> LookFollowsCamera { get; private set; }
         public static ConfigEntry<KeyboardShortcut> LookLockKey { get; private set; }
         public static ConfigEntry<KeyCode> LookLockButton { get; private set; }
+        public static ConfigEntry<bool> ScrollZoom { get; private set; }
+        public static ConfigEntry<KeyboardShortcut> ZoomInKey { get; private set; }
+        public static ConfigEntry<KeyboardShortcut> ZoomOutKey { get; private set; }
 
         public static void Bind(ConfigFile cfg)
         {
             FollowCamera = cfg.Bind(Section, "FollowCamera", true,
                 "A third person view that follows you, on land as well as aboard. FollowKey switches between it and first person, and CameraKeyFollows makes the camera key go through it too. While this is on, bottles, mugs, food and the pipe are eaten, drunk and smoked in this view and in the game's ship view, and up and down in both views follow the game's Invert Mouse setting. An item you tip to pour instead, such as a soup pot or a bucket, is left to first person: these views judge the tip against the way you were looking when the view opened. Off, FollowKey and FollowButton do nothing and the camera key works as in the game.");
             FollowDistance = cfg.Bind(Section, "FollowDistance", 4f,
-                new ConfigDescription("How far behind you the following camera starts, in meters. Changing it while the camera follows you moves it there. The scroll wheel moves it closer or farther while your hands are empty and nothing else has taken the mouse.", new AcceptableValueRange<float>(1.2f, 12f)));
+                new ConfigDescription("How far behind you the following camera starts, in meters. Changing it while the camera follows you moves it there. The scroll wheel moves it closer or farther while your hands are empty and nothing else has taken the mouse (see ScrollZoom), and ZoomInKey and ZoomOutKey move it at any time.", new AcceptableValueRange<float>(1.2f, 12f)));
             FollowDistance.SettingChanged += (s, e) => PlayerOrbitCamera.ApplyFollowDistance();
             FollowKey = cfg.Bind(Section, "FollowKey", new KeyboardShortcut(KeyCode.V),
                 "Switches between first person and the third person view that follows you, on land as well as aboard. From the game's ship view it switches to following you. It works while you hold other keys, such as the movement keys. Set to the game's camera key, that key goes through the follow view as CameraKeyFollows describes. Does nothing while FollowCamera is off or in the shipyard.");
@@ -37,6 +40,12 @@ namespace SailwindPlayerModel
                 "Freezes which way your body faces and where it looks while the view follows you, so the camera orbits around you and the movement keys work from the frozen facing. A click says which way it went: low for frozen, high for following the camera. It works while you hold other keys, such as the movement keys. Does nothing in first person, in the game's ship view, in the shipyard or while FollowCamera is off.");
             LookLockButton = cfg.Bind(Section, "LookLockButton", KeyCode.None,
                 "A gamepad button that does what LookLockKey does, read while the game's controller setting is on. While this is None, the look lock is switched from the keyboard only.");
+            ScrollZoom = cfg.Bind(Section, "ScrollZoom", true,
+                "The scroll wheel moves the following camera closer or farther while your hands are empty. With the game's controller setting on, the triggers do the same. Off, the wheel and the triggers leave the camera where it is, and ZoomInKey and ZoomOutKey are the only way to move it. Held items keep the wheel either way, and the game's ship view zooms as in the game.");
+            ZoomInKey = cfg.Bind(Section, "ZoomInKey", KeyboardShortcut.Empty,
+                "Held down, moves the following camera closer. Works with your hands full, unlike the scroll wheel. Unbound by default.");
+            ZoomOutKey = cfg.Bind(Section, "ZoomOutKey", KeyboardShortcut.Empty,
+                "Held down, moves the following camera farther away. Works with your hands full, unlike the scroll wheel. Unbound by default.");
         }
     }
 
@@ -81,6 +90,7 @@ namespace SailwindPlayerModel
         private const float EyeAbovePivot = 0.25f;
         private const float MinDistance = 1.2f, MaxDistance = 12f;
         private const float TurnDegreesPerSecond = 720f;
+        private const float KeyZoomMetersPerSecond = 4f;
         private const int UiLayer = 5, InvisLayer = 16;
 
         private static readonly AccessTools.FieldRef<BoatCamera, Transform> CenterEyeRef =
@@ -130,6 +140,7 @@ namespace SailwindPlayerModel
                 {
                     _mode = BoatCamera.on ? Mode.Ship : Mode.FirstPerson;
                     RestoreOrbitLook();
+                    ResetEyeTurn(__instance);
                     return true;
                 }
                 // A fault in the render time placement takes the hook off for the session instead of being put back
@@ -191,10 +202,11 @@ namespace SailwindPlayerModel
                 MatchGameInvert();
                 // The game places its ship view. Not on a frame the key went down, even one ignored above: the game
                 // would read the key too and switch the view off.
-                if (_mode == Mode.Ship) return !keyDown;
+                if (_mode == Mode.Ship) { ResetEyeTurn(__instance); return !keyDown; }
 
                 if (_distance < 0f) _distance = CameraTuning.FollowDistance.Value;
-                if (ZoomInputFree()) _distance = Mathf.Clamp(_distance - GameInput.GetScrollAxis() * 5f, MinDistance, MaxDistance);
+                if (CameraTuning.ScrollZoom.Value && ZoomInputFree()) _distance = Mathf.Clamp(_distance - GameInput.GetScrollAxis() * 5f, MinDistance, MaxDistance);
+                if (inPlay) _distance = Mathf.Clamp(_distance + ZoomKeysAxis() * KeyZoomMetersPerSecond * Time.unscaledDeltaTime, MinDistance, MaxDistance);
                 // Not on the frame the view starts, so a turn key also bound to a key that opens the view does not
                 // switch the lock as it opens.
                 if (!_lookLockSet)
@@ -345,6 +357,24 @@ namespace SailwindPlayerModel
             if (GameState.inCursorMenu || ConfigWindowOpen() || !MouseLook.MouseLookIsEnabled()) return false;
             var p = LocalInteraction.Pointer;
             return p == null || p.GetHeldItem() == null;
+        }
+
+        // The zoom keys: -1 closer, +1 farther, 0 neither or both. Not while a menu or the F1 window is up, where the keys
+        // may be typing. A held item does not stop them; they are there for when the wheel is taken. Unscaled time, so the
+        // speed holds during the sleep warp.
+        private static float ZoomKeysAxis()
+        {
+            if (GameState.inCursorMenu || ConfigWindowOpen()) return 0f;
+            float axis = 0f;
+            if (ZoomKeyHeld(CameraTuning.ZoomInKey.Value)) axis -= 1f;
+            if (ZoomKeyHeld(CameraTuning.ZoomOutKey.Value)) axis += 1f;
+            return axis;
+        }
+
+        // Held with its own modifiers, whatever else is held: zooming while walking is the point.
+        private static bool ZoomKeyHeld(KeyboardShortcut shortcut)
+        {
+            return shortcut.MainKey != KeyCode.None && Input.GetKey(shortcut.MainKey) && ModifiersHeld(shortcut);
         }
 
         // SwitchOn turns the player's own look off and SwitchOff turns it back on, but getting out of bed turns it on in
@@ -549,25 +579,32 @@ namespace SailwindPlayerModel
             Vector3 from = pitch.TransformPoint(new Vector3(0f, EyeAbovePivot, 0f));
             Vector3 want = pitch.TransformPoint(new Vector3(0f, EyeAbovePivot, -Mathf.Max(_distance, MinDistance)));
             // Start the sweep somewhere clear. A sphere that starts inside a wall does not see it, and the eye went out
-            // the far side.
+            // the far side. Under a low deckhead or cabin roof a thinner sphere still fits at the eye's own height.
             Vector3 start = from;
             float radius = 0.2f;
-            if (Overlaps(from, radius, rig))
+            bool lowered = false;
+            if (!FromReachable(pivot, from, radius, rig))
             {
-                start = pivot;
                 radius = 0.1f;
-                // Crouched under a low deckhead the head can be in it too. The top of the player's own capsule (the
-                // controller is 1.1 m tall with a 0.2 m radius, centered on the observer) is somewhere the game keeps
-                // out of walls.
-                if (Overlaps(pivot, radius, rig)) start = Refs.observerMirror.transform.position + Vector3.up * CapsuleTopAboveBody;
+                if (!FromReachable(pivot, from, radius, rig))
+                {
+                    start = pivot;
+                    lowered = true;
+                    // Crouched under a low deckhead the head can be in it too. The top of the player's own capsule (the
+                    // controller is 1.1 m tall with a 0.2 m radius, centered on the observer) is somewhere the game keeps
+                    // out of walls.
+                    if (Overlaps(pivot, radius, rig)) start = Refs.observerMirror.transform.position + Vector3.up * CapsuleTopAboveBody;
+                }
             }
             Vector3 dir = want - start;
             dir = dir.sqrMagnitude > 1e-6f ? dir.normalized : -pitch.forward;
             float clear = ClearDistance(start, want, rig, radius);
-            // Something beside the path (a mast, a chair back) can pull the sphere in close. Keep the eye 0.3 m back as
-            // before, but only when a thin ray finds nothing straight behind; the old floor put the eye through a
-            // bulkhead there.
-            if (clear < 0.3f && ClearDistance(start, start + dir * 0.5f, rig, 0f) >= 0.4f) clear = 0.3f;
+            // Squeezed. With under 0.3 m of room the eye goes onto the line the view turns about, so turning in a
+            // tight spot turns the view in place. It used to be held 0.3 m back, where it swung on a 0.3 m circle
+            // and read as first person with the camera off center (reported after walking into things). Eased in
+            // up to 0.6 m so nothing jumps. This also covers what that floor was for: something beside the path
+            // (a mast, a chair back) pulling the sphere in close no longer leaves the eye part way in.
+            if (clear < 0.6f) clear = Mathf.InverseLerp(0.3f, 0.6f, clear) * 0.6f;
             want = start + dir * clear;
 
             // Keep the eye out of the waves while the player's head is out of the water. A swimmer diving under is
@@ -584,6 +621,57 @@ namespace SailwindPlayerModel
                 }
             }
             eye.position = want;
+            // Started low, the eye sits under the line it looks along, and looking along the pitch from there frames the
+            // hips, not the head. Turn it up to the head instead. Close in, where that direction swings with every small
+            // move, it eases back to the pitch. Eased in and out over about a quarter second, so walking under the edge
+            // of a beam does not snap the view. Place runs twice a frame; the ease advances once.
+            if (_lowTurnFrame != Time.frameCount)
+            {
+                // The view was closed in between, so what it was doing under a deck back then no longer counts.
+                if (Time.frameCount - _lowTurnFrame > 2) _lowTurn01 = 0f;
+                _lowTurnFrame = Time.frameCount;
+                _lowTurn01 = Mathf.MoveTowards(_lowTurn01, lowered ? 1f : 0f, Time.unscaledDeltaTime * 4f);
+            }
+            Quaternion turn = Quaternion.identity;
+            if (_lowTurn01 > 0.001f)
+            {
+                Vector3 toHead = pivot - want;
+                float d = toHead.magnitude;
+                if (d > 0.15f)
+                {
+                    Quaternion atHead = Quaternion.LookRotation(toHead / d, pitch.up);
+                    Quaternion local = Quaternion.Inverse(pitch.rotation) * atHead;
+                    turn = Quaternion.Slerp(Quaternion.identity, local, Mathf.InverseLerp(0.15f, 0.6f, d) * Mathf.SmoothStep(0f, 1f, _lowTurn01));
+                }
+            }
+            if (eye.localRotation != turn) eye.localRotation = turn;
+        }
+
+        private static float _lowTurn01;
+        private static int _lowTurnFrame = -1;
+
+        /// <summary>
+        /// Whether the sweep can start at <paramref name="from"/>, above the head: nothing there, and nothing between the
+        /// head and it. Under a thin deck the point above the head can be clear on the deck's far side, and an eye that
+        /// started there swept along the deck above with the player hidden under it.
+        /// </summary>
+        private static bool FromReachable(Vector3 pivot, Vector3 from, float radius, Transform rig)
+        {
+            if (Overlaps(from, radius, rig)) return false;
+            float rise = (from - pivot).magnitude;
+            return rise < 1e-3f || ClearDistance(pivot, from, rig, radius) >= rise - 0.09f;
+        }
+
+        /// <summary>
+        /// The eye back square on the rig, as the game's ship view and SwitchOff expect, after Place turned it up to the
+        /// head under a low deckhead. Only while the eye hangs off the rig.
+        /// </summary>
+        private static void ResetEyeTurn(BoatCamera cam)
+        {
+            if (!BoatCamera.on || cam.transform.childCount == 0) return;
+            Transform eye = CenterEyeRef(cam);
+            if (eye != null && eye.parent == cam.transform.GetChild(0) && eye.localRotation != Quaternion.identity)
+                eye.localRotation = Quaternion.identity;
         }
 
         private static readonly Crest.SampleHeightHelper _seaAtEye = new Crest.SampleHeightHelper();

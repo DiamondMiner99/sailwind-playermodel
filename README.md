@@ -13,7 +13,8 @@ other mods can add buttons to.
   CameraKeyFollows on, C goes from first person to following you, then aboard to the ship view, then back to
   first person. On a gamepad the camera button goes through the follow view that way until FollowButton is
   set. The scroll wheel moves the camera closer or farther while your hands are empty and nothing else has
-  taken the mouse, and your body turns with the camera, so you walk, strafe and back up from where it looks.
+  taken the mouse (ScrollZoom turns that off), and ZoomInKey and ZoomOutKey move it with your hands full. Your
+  body turns with the camera, so you walk, strafe and back up from where it looks.
   H freezes which way you face and where you look, so the camera orbits around you while you walk from the
   frozen facing. Up and down in both views follow the game's Invert Mouse setting. You can eat, drink and
   smoke in both views with bottles, mugs, food and the pipe. An item you tip to pour, such as a soup pot or
@@ -36,20 +37,29 @@ other mods can add buttons to.
   body from the chest down. A seat has to be on the boat you are aboard, or ashore when you are ashore. Any
   movement key or jump stands you back up where you sat down from. The ship's wheel, a rope winch, the
   anchor winch and the bilge pump are worked from the seat when their handles are within reach of where you
-  sit: your body turns and leans toward them and you keep the seat. Handles farther off stand you up to
-  them, and so does a sail pusher, which you push while walking along, and a wheel or winch held with the
-  mouse (the game's steer with mouse and winches with mouse settings). If the boat heels or the crate you
+  sit, whether you hold them with a click or with the game's steer with mouse and winches with mouse
+  settings: your body turns and leans toward them and you keep the seat. The wheel takes one hand and the other
+  rests on your thigh (SeatedWheelOneHand off puts both on it). On a ledge, taking hold of one of these behind
+  you swings your legs round to it, or turns you on the spot where there is no far side. Handles
+  farther off stand you up to them, and so does a sail pusher, which you push while walking along, and any of
+  them while you sit on the floor. If the boat heels or the crate you
   sit on slides far enough to carry one of those four out of reach while you work it, you stand up to it. A
   Shipyard Expansion tiller and another mod's control, such as HMS Leopard's oars or the Realistic Skies
   telescope, are worked from a seat with no reach test, so sit within arm's reach of one or your hands will
   not be on it. The movement keys work whatever control you hold from the seat instead of walking you, so
-  click to let go of it before you stand up. You stay seated while you use the chart table or a market, and
-  while you pass out or sleep in a tavern room. Don't sit on a lit stove for too long.
+  click to let go of it before you stand up. Sitting at a table, a hand with nothing to hold rests on the
+  tabletop. You stay seated while you use the chart table or a market, and while you pass out or sleep in a
+  tavern room. Don't sit on a lit stove for too long.
 - The model lies down in the game's beds.
-- Character screen: head, hair, eyebrows, facial hair, hat, torso, hips, legs, and colors for skin, hair,
-  cloth, trim, leather and metal. Uses the game's NPC parts. Opened from the pause menu. It is drawn larger on
-  screens taller than 1080 pixels, and the UIScale setting makes it larger or smaller. In a window too small for
-  it, it shrinks to fit.
+- Character screen: head, hair, eyebrows, facial hair, hat, hood, face cover, torso, gloves, hips, legs, back,
+  shoulders, elbows, knees, belt, and colors for skin, hair, cloth, trim, leather and metal. A hood hides your
+  hair and hat, and a face cover hides your beard. Gloves set to Match torso come with the torso you pick. Uses
+  the game's NPC parts. Opened from the pause menu. It is drawn larger on screens taller than 1080 pixels, and the
+  UIScale setting makes it larger or smaller. In a window too small for it, it shrinks to fit.
+- Outfits: the Character screen lists your saved looks beside the preview, as many as you like. Click one to put
+  it on, and Current look to go back to what you had on. Save new, Update, Rename and Delete manage the list.
+  They are kept in `BepInEx/config/com.diamondminer99.playermodel.outfits.txt`, one per line, so a crew can share
+  a uniform by copying a line.
 - Pause menu: Esc opens a menu with Resume, Character, Settings, Recover Boat and Quit Game. Settings
   opens the normal settings screen and Recover Boat opens the game's boat recovery screen.
 - The model is cloned from the game's NPCs at runtime, so there are no asset files.
@@ -102,13 +112,16 @@ Options are in `BepInEx/config/com.diamondminer99.playermodel.cfg` or the F1 men
 
 - **Pose**: crouch depth, torso lean, foot height
 - **Held Tool**: how held items are shown, elbow direction and how fast the arms move onto a grip
-- **Interactions**: on/off, how far the model steps in to reach a control, hand spacing on wheels and cranks
+- **Interactions**: on/off, how far the model steps in to reach a control, hand spacing on wheels and cranks,
+  one hand or both on the wheel from a seat (SeatedWheelOneHand)
 - **Item Poses**: where items are carried, read and brought to the mouth, and how far the wrist bends
 - **Seating**: on/off, the sit key, the (seated) label, how long sitting down takes, seated view height, whether
-  lit stoves burn, and whether your body shows in first person while seated and where it fades out
+  lit stoves burn, whether your body shows in first person while seated and where it fades out, and whether
+  empty hands rest on a table (ArmsOnTables)
 - **Camera**: on/off for the camera that follows you, how far away it starts, its key (FollowKey, V) and gamepad
   button (FollowButton), whether the camera key goes through it (CameraKeyFollows), and the look lock (LookLockKey,
-  H, with LookLockButton for a gamepad and LookFollowsCamera for the state the view opens in)
+  H, with LookLockButton for a gamepad and LookFollowsCamera for the state the view opens in), scroll wheel zoom
+  (ScrollZoom) and the zoom keys (ZoomInKey, ZoomOutKey, unbound by default)
 - **Appearance**: your character, as `slot=variant` pairs. The Character screen writes this
 - **Menu**: pause menu button size, and the size of the Character screen, the seat hints and the (seated) label
   (UIScale)
