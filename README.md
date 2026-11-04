@@ -13,10 +13,10 @@ other mods can add buttons to.
   CameraKeyFollows on, C goes from first person to following you, then aboard to the ship view, then back to
   first person. On a gamepad the camera button goes through the follow view that way until FollowButton is
   set. The scroll wheel moves the camera closer or farther while your hands are empty and nothing else has
-  taken the mouse (ScrollZoom turns that off), and ZoomInKey and ZoomOutKey move it with your hands full. Your
-  body turns with the camera, so you walk, strafe and back up from where it looks.
-  H freezes which way you face and where you look, so the camera orbits around you while you walk from the
-  frozen facing. Up and down in both views follow the game's Invert Mouse setting. You can eat, drink and
+  taken the mouse (ScrollZoom turns that off), and ZoomInKey and ZoomOutKey move it with your hands full. The
+  camera orbits around you when you stand still. Your body turns to where it looks when you move, throw or drop
+  something, so you walk, strafe and back up from the camera. LookLockKey, unbound by default, freezes which way
+  you face so you walk from that facing. Up and down in both views follow the game's Invert Mouse setting. You can eat, drink and
   smoke in both views with bottles, mugs, food and the pipe. An item you tip to pour, such as a soup pot or
   a bucket, is left to first person, because these views judge the tip against the way you were looking when
   the view opened. While swimming in the follow view, Crouch dives and Jump brings you back up.
@@ -120,7 +120,7 @@ Options are in `BepInEx/config/com.diamondminer99.playermodel.cfg` or the F1 men
   empty hands rest on a table (ArmsOnTables)
 - **Camera**: on/off for the camera that follows you, how far away it starts, its key (FollowKey, V) and gamepad
   button (FollowButton), whether the camera key goes through it (CameraKeyFollows), and the look lock (LookLockKey,
-  H, with LookLockButton for a gamepad and LookFollowsCamera for the state the view opens in), scroll wheel zoom
+  unbound by default, with LookLockButton for a gamepad and LookFollowsCamera for the state the view opens in), scroll wheel zoom
   (ScrollZoom) and the zoom keys (ZoomInKey, ZoomOutKey, unbound by default)
 - **Appearance**: your character, as `slot=variant` pairs. The Character screen writes this
 - **Menu**: pause menu button size, and the size of the Character screen, the seat hints and the (seated) label

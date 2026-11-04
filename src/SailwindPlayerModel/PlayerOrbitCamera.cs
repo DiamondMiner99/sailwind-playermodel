@@ -35,9 +35,9 @@ namespace SailwindPlayerModel
             CameraKeyFollows = cfg.Bind(Section, "CameraKeyFollows", false,
                 "The game's camera key also goes through the follow view: first person, following you, then aboard the game's ship view, then back to first person. Stepping ashore in the ship view switches to following you. Off, the camera key works as in the game: aboard it switches between first person and the ship view, and stepping ashore in the ship view returns to first person. From the follow view it goes to the ship view, and ashore it does nothing.");
             LookFollowsCamera = cfg.Bind(Section, "LookFollowsCamera", true,
-                "While the camera follows you, your body turns with the camera, so you walk, strafe and back up from where the camera looks. Off, your body holds the way it faces and the camera orbits around you, which is easier to line a picture up with. LookLockKey switches it while the view is up, and the view starts from this setting every time, so a change here takes effect the next time you open the view.");
-            LookLockKey = cfg.Bind(Section, "LookLockKey", new KeyboardShortcut(KeyCode.H),
-                "Freezes which way your body faces and where it looks while the view follows you, so the camera orbits around you and the movement keys work from the frozen facing. A click says which way it went: low for frozen, high for following the camera. It works while you hold other keys, such as the movement keys. Does nothing in first person, in the game's ship view, in the shipyard or while FollowCamera is off.");
+                "While the camera follows you, the camera orbits around you when you stand still, and your body turns to where it looks when you move, throw or drop something, so you walk, strafe and back up from the camera. Off, your body holds the way it faces even while you walk. LookLockKey switches it while the view is up, and the view starts from this setting every time, so a change here takes effect the next time you open the view.");
+            LookLockKey = cfg.Bind(Section, "LookLockKey", KeyboardShortcut.Empty,
+                "Freezes which way your body faces and where it looks while the view follows you, so the movement keys work from the frozen facing. A click says which way it went: low for frozen, high for following the camera. It works while you hold other keys, such as the movement keys. Unbound by default. Does nothing in first person, in the game's ship view, in the shipyard or while FollowCamera is off.");
             LookLockButton = cfg.Bind(Section, "LookLockButton", KeyCode.None,
                 "A gamepad button that does what LookLockKey does, read while the game's controller setting is on. While this is None, the look lock is switched from the keyboard only.");
             ScrollZoom = cfg.Bind(Section, "ScrollZoom", true,
@@ -83,6 +83,7 @@ namespace SailwindPlayerModel
 
         // Whether moving stops turning the player to the camera, and whether that answer was taken for the view now up.
         private static bool _lookLocked;
+        private static bool _bodyFollowing;
         private static bool _lookLockSet;
 
         private const float PivotAboveBody = 0.65f;     // the observer is at the controller's middle; this is about the head
@@ -109,8 +110,11 @@ namespace SailwindPlayerModel
         /// <summary>True while the camera is following the local player in third person.</summary>
         public static bool Following { get { return BoatCamera.on && _mode == Mode.Following; } }
 
-        /// <summary>The look lock is on: the body holds the way it faces and where it looks while the camera orbits.</summary>
-        internal static bool LookLocked { get { return _lookLocked && Following; } }
+        /// <summary>
+        /// The body holds the way it faces and where it looks while the camera orbits: standing still, or with the look
+        /// lock on.
+        /// </summary>
+        internal static bool BodyHolds { get { return Following && !_bodyFollowing; } }
 
         /// <summary>FollowDistance was changed (F1 or a config reload): the camera takes the new distance.</summary>
         internal static void ApplyFollowDistance()
@@ -215,7 +219,8 @@ namespace SailwindPlayerModel
                     _lookLocked = !CameraTuning.LookFollowsCamera.Value;
                 }
                 else if (inPlay && LookLockPressed()) ToggleLookLock();
-                if (!_lookLocked) TurnPlayerToCamera(__instance);
+                _bodyFollowing = !_lookLocked && WantsToFaceCamera();
+                if (_bodyFollowing) TurnPlayerToCamera(__instance);
                 Place(__instance);
                 return false;
             }
@@ -523,6 +528,24 @@ namespace SailwindPlayerModel
             Plugin.Log.LogInfo("[Camera] look lock " + (_lookLocked ? "on" : "off"));
         }
 
+        /// <summary>
+        /// Whether the player is doing something that goes the way the body faces: walking (the same keys, D-pad and stick
+        /// OVRPlayerController reads), or throwing or dropping a held item, which leaves from the front of the body.
+        /// Standing still with none of these, the camera orbits around the body.
+        /// </summary>
+        private static bool WantsToFaceCamera()
+        {
+            if (GameInput.GetKey(InputName.MoveUp) || GameInput.GetKey(InputName.MoveDown)
+                || GameInput.GetKey(InputName.MoveLeft) || GameInput.GetKey(InputName.MoveRight)) return true;
+            if (Mathf.Abs(GameInput.GetPrimaryHorizontal()) > StickDeadZone || Mathf.Abs(GameInput.GetPrimaryVertical()) > StickDeadZone) return true;
+            if (GameInput.controllerEnabled && (OVRInput.Get(OVRInput.Button.DpadUp) || OVRInput.Get(OVRInput.Button.DpadDown))) return true;
+            if (!GameInput.GetKey(InputName.Throw) && !GameInput.GetKey(InputName.PickUp)) return false;
+            var pointer = LocalInteraction.Pointer;
+            return pointer != null && pointer.GetHeldItem() != null;
+        }
+
+        private const float StickDeadZone = 0.15f;
+
         /// <summary>Turn the player to face where the camera looks, so walking, strafing and backing up all read from the camera.</summary>
         private static void TurnPlayerToCamera(BoatCamera cam)
         {
@@ -581,7 +604,9 @@ namespace SailwindPlayerModel
             // Start the sweep somewhere clear. A sphere that starts inside a wall does not see it, and the eye went out
             // the far side. Under a low deckhead or cabin roof a thinner sphere still fits at the eye's own height.
             Vector3 start = from;
-            float radius = 0.2f;
+            // Thin aboard: a boat is full of stays and rope, and a wider sphere would catch every one that passes behind
+            // the head and jump the eye in and out.
+            float radius = GameState.currentBoat != null ? 0.1f : 0.2f;
             bool lowered = false;
             if (!FromReachable(pivot, from, radius, rig))
             {
@@ -590,6 +615,7 @@ namespace SailwindPlayerModel
                 {
                     start = pivot;
                     lowered = true;
+                    LogLowered();
                     // Crouched under a low deckhead the head can be in it too. The top of the player's own capsule (the
                     // controller is 1.1 m tall with a 0.2 m radius, centered on the observer) is somewhere the game keeps
                     // out of walls.
@@ -649,6 +675,18 @@ namespace SailwindPlayerModel
 
         private static float _lowTurn01;
         private static int _lowTurnFrame = -1;
+        private static int _loweredLogs;
+        private static float _loweredLogAt = -100f;
+        private static string _blockedBy;
+
+        // What put the eye's start under a low deck, the first few times, so a report comes with its cause.
+        private static void LogLowered()
+        {
+            if (_loweredLogs >= 8 || Time.unscaledTime - _loweredLogAt < 5f) return;
+            _loweredLogs++;
+            _loweredLogAt = Time.unscaledTime;
+            Plugin.Log.LogInfo($"[Camera] low deck over the head: '{_blockedBy}'");
+        }
 
         /// <summary>
         /// Whether the sweep can start at <paramref name="from"/>, above the head: nothing there, and nothing between the
@@ -710,6 +748,14 @@ namespace SailwindPlayerModel
         {
             if (c == null) return false;
             if (c.gameObject.layer == 2 && !Seating.IsStaticScenery(c)) return false;
+            // A shape right on a boat's rigidbody is a rough envelope round the whole ship (a capsule about 3 m across on the
+            // small dhow), not its deck or rails. The player's head is inside it on deck, which read as being under a
+            // low deck everywhere aboard.
+            if (c.attachedRigidbody != null && c.attachedRigidbody.transform == c.transform)
+            {
+                var mesh = c as MeshCollider;
+                if (mesh == null || mesh.convex) return false;
+            }
             if (Refs.charController != null && c.transform.IsChildOf(Refs.charController.transform)) return false;
             if (c.transform.IsChildOf(Refs.observerMirror.transform)) return false;
             if (rig != null && c.transform.IsChildOf(rig)) return false;   // anything riding along with the camera
@@ -732,7 +778,11 @@ namespace SailwindPlayerModel
             int n = Physics.OverlapSphereNonAlloc(at, radius, _overlaps, CastMask, QueryTriggerInteraction.Ignore);
             Transform walkRoot = walkCopy && Refs.charController != null ? Refs.charController.transform.parent : null;
             for (int i = 0; i < n; i++)
-                if (Counts(_overlaps[i], walkCopy, walkRoot, rig)) return true;
+                if (Counts(_overlaps[i], walkCopy, walkRoot, rig))
+                {
+                    _blockedBy = _overlaps[i].name + " (layer " + _overlaps[i].gameObject.layer + ", " + (walkCopy ? "walking copy" : "visible") + ")";
+                    return true;
+                }
             return false;
         }
 
@@ -769,6 +819,7 @@ namespace SailwindPlayerModel
             for (int i = 0; i < n; i++)
             {
                 if (!Counts(_hits[i].collider, walkCopy, walkRoot, rig)) continue;
+                _blockedBy = _hits[i].collider.name + " (layer " + _hits[i].collider.gameObject.layer + ", " + (walkCopy ? "walking copy" : "visible") + ")";
                 // The start was checked clear, so something touching it stops the eye right there.
                 best = Mathf.Min(best, _hits[i].distance <= 0f ? 0f : _hits[i].distance - margin);
             }

@@ -121,9 +121,9 @@ namespace SailwindPlayerModel
                 PlaceRoot(cc);
                 _body.SpeedMps = SampleDeckSpeed(cc);
                 _body.Crouch01Target = VanillaPlayer.Crouch01();
-                // The look lock freezes where the body looks as well as which way it faces, so the pitch holds
-                // the value it had when the lock went on and the camera orbits without tilting the body.
-                if (!PlayerOrbitCamera.LookLocked) _body.LookPitchDegTarget = VanillaPlayer.HeadLookPitchDeg();
+                // Standing still in the follow view, or with the look lock on, the body holds where it looks as well as
+                // which way it faces, so the pitch keeps its value and the camera orbits without tilting the body.
+                if (!PlayerOrbitCamera.BodyHolds) _body.LookPitchDegTarget = VanillaPlayer.HeadLookPitchDeg();
                 FeedRest();
                 if (BodyTuning.SwimAnimation.Value && PlayerSwimming.swimming && !Downed.HoldsView)
                     _body.SetSwimming(!PlayerSwimming.swimmingOnSurface, _deckVelocity);
