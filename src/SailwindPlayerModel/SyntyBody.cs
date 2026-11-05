@@ -1565,19 +1565,35 @@ namespace SailwindPlayerModel
             flat.Normalize();
             Vector3 shoulderMid = SeatedShoulderMid(hipsWorld, flat);
             Vector3 aim;
-            if (!RotorGrip.MeasureSeated(control, shoulderMid, Vector3.Cross(Vector3.up, flat), _shoulderHalf, out need, out aim,
-                    _rotor.Control == control ? _rotor.OneHandSide : 0))
+            limit = SeatedReachLimit(arm);
+            if (!RotorGrip.MeasureSeated(control, shoulderMid, Vector3.Cross(Vector3.up, flat), _shoulderHalf,
+                    NearHandReach(limit), out need, out aim, _rotor.Control == control ? _rotor.OneHandSide : 0))
                 return false;
             need += ChestTurnReachLost(control, flat, shoulderMid, aim);
 
-            // The arms reach to the palm and no farther (the IK clamps there), and the lean adds exactly the
-            // shoulder travel the seated lean provides, so the limit promises nothing the body does not do.
-            limit = (arm.Length + arm.PalmReach) * InteractionTuning.SeatedReach.Value
-                    + ShoulderAboveHips() * Mathf.Sin(InteractionTuning.SeatedLeanDegrees.Value * Mathf.Deg2Rad);
             Vector3 toAim = aim - shoulderMid;
             toAim.y = 0f;
             if (toAim.sqrMagnitude > 1e-6f) offFacingDeg = Vector3.Angle(flat, toAim);
             return true;
+        }
+
+        /// <summary>
+        /// How far a body reaches sitting down. The arms reach to the palm and no farther (the IK clamps there), and the lean
+        /// adds exactly the shoulder travel the seated lean provides, so the limit promises nothing the body does not do.
+        /// </summary>
+        private float SeatedReachLimit(ArmIk arm)
+        {
+            return (arm.Length + arm.PalmReach) * InteractionTuning.SeatedReach.Value
+                   + ShoulderAboveHips() * Mathf.Sin(InteractionTuning.SeatedLeanDegrees.Value * Mathf.Deg2Rad);
+        }
+
+        /// <summary>
+        /// How far the hand nearer a wheel may be carried and still take it: the seated limit less the most the turned chest
+        /// can cost, so the nearer hand never loses a seat that the other hand could have kept.
+        /// </summary>
+        private float NearHandReach(float limit)
+        {
+            return limit - _shoulderHalf * Mathf.Sin(InteractionTuning.SeatedTurnDegrees.Value * Mathf.Deg2Rad);
         }
 
         /// <summary>Move the body so its hip joints are on the seat, facing the way the seat faces, eased.</summary>
@@ -2213,7 +2229,7 @@ namespace SailwindPlayerModel
                 Vector3 seatGoal = seated ? SeatGoalForward() : Vector3.forward;
                 rotor = _rotor.Update(_ixTarget, seated ? SeatedShoulderMid(_seatHips, seatGoal) : _root.position,
                     seated ? 0f : Mathf.Max(0f, _shoulderMidRoot.z), _armR.Length, dt,
-                    seated, Vector3.Cross(Vector3.up, seatGoal), _shoulderHalf);
+                    seated, Vector3.Cross(Vector3.up, seatGoal), _shoulderHalf, seated ? NearHandReach(SeatedReachLimit(_armR)) : 0f);
             }
             else if (_rotor.Active)
             {
@@ -2353,7 +2369,8 @@ namespace SailwindPlayerModel
             Vector3 shoulderMid = SeatedShoulderMid(SeatHipsDrawn(), seatFwd);
             float need;
             Vector3 aim;
-            if (!RotorGrip.MeasureSeated(_ixTarget, shoulderMid, Vector3.Cross(Vector3.up, seatFwd), _shoulderHalf, out need, out aim, _rotor.OneHandSide))
+            if (!RotorGrip.MeasureSeated(_ixTarget, shoulderMid, Vector3.Cross(Vector3.up, seatFwd), _shoulderHalf,
+                    NearHandReach(SeatedReachLimit(_armR)), out need, out aim, _rotor.OneHandSide))
                 return;
             need += ChestTurnReachLost(_ixTarget, seatFwd, shoulderMid, aim);
 

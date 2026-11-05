@@ -23,7 +23,7 @@ namespace SailwindPlayerModel
         public const string PluginName = "Sailwind Player Model";
         // BepInEx 5 parses this as a strict System.Version. No SemVer suffixes, or the plugin silently fails
         // to load with no error.
-        public const string PluginVersion = "0.1.6";
+        public const string PluginVersion = "0.1.7";
 
         // Set here rather than in Awake: other mods can call the public API from their own Awake, which may run
         // before this one. A bare 'Logger' inside this class is the inherited instance property, hence the full name.

@@ -64,7 +64,7 @@ namespace SailwindPlayerModel
                 new ConfigDescription("How much of your arm's reach counts as within reach while sitting. A wheel, winch or pump this close to the seat is worked sitting down; anything farther stands you up to it. The distance counted is to the farthest point your hands are carried to, so a wheel is measured with its handle at the end of the hand's swing and a pump at the far side of its stroke.",
                     new AcceptableValueRange<float>(0.6f, 1.1f)));
             SeatedWheelOneHand = cfg.Bind(Section, "SeatedWheelOneHand", true,
-                "Sitting at the ship's wheel, steer with whichever hand has the shorter reach and keep the other on your thigh, which works from farther away. Off, both hands go on the wheel as they do standing, and the seat has to be close enough for both.");
+                "Sitting at the ship's wheel, steer with the hand nearer the wheel and keep the other on your thigh, which works from farther away. Off, both hands go on the wheel as they do standing, and the seat has to be close enough for both.");
             SeatedLeanDegrees = cfg.Bind(Section, "SeatedLeanMax", 40f,
                 new ConfigDescription("How far you lean off the seat toward a wheel or winch you are working, in degrees. Leaning also counts toward what you can reach, so 0 keeps the seat only where your arms reach sitting upright.",
                     new AcceptableValueRange<float>(0f, 60f)));

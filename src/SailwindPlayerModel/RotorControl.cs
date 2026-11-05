@@ -421,10 +421,11 @@ namespace SailwindPlayerModel
         /// <paramref name="shoulderForward"/> is how far the shoulders sit in front of it, so the stand distance
         /// is measured from the shoulders. Seated, <paramref name="bodyPos"/> is the middle of the seated shoulders,
         /// and <paramref name="seatRight"/> and <paramref name="shoulderHalf"/> say where each shoulder is, which a
-        /// wheel steered with one hand is measured from.
+        /// wheel steered with one hand is measured from. <paramref name="nearHandReach"/> is how far the nearer hand may
+        /// be carried before the other takes the wheel instead, see <see cref="PickOneHand"/>.
         /// </summary>
         public bool Update(Transform control, Vector3 bodyPos, float shoulderForward, float armLength, float dt,
-            bool seated = false, Vector3 seatRight = default(Vector3), float shoulderHalf = 0f)
+            bool seated = false, Vector3 seatRight = default(Vector3), float shoulderHalf = 0f, float nearHandReach = 0f)
         {
             if (control == null) { Release(); return false; }
             if (control != _control)
@@ -451,7 +452,7 @@ namespace SailwindPlayerModel
 
             if (seated && OneHanded(_spec))
             {
-                UpdateOneHand(control, f, bodyPos + seatRight * shoulderHalf, bodyPos - seatRight * shoulderHalf, dt);
+                UpdateOneHand(control, f, bodyPos + seatRight * shoulderHalf, bodyPos - seatRight * shoulderHalf, nearHandReach, dt);
                 return true;
             }
             // Standing up with the wheel still held, both hands travel to it from where they are, the free one off the
@@ -554,17 +555,17 @@ namespace SailwindPlayerModel
         }
 
         /// <summary>
-        /// One hand on a wheel from a seat. The hand that has the shorter reach takes it and keeps it until the wheel is
-        /// let go, riding a handle round and moving to the next as the wheel turns. The other hand is left free, and the
+        /// One hand on a wheel from a seat. The hand <see cref="PickOneHand"/> chooses takes it and keeps it until the wheel
+        /// is let go, riding a handle round and moving to the next as the wheel turns. The other hand is left free, and the
         /// body rests it on the thigh.
         /// </summary>
-        private void UpdateOneHand(Transform control, RotorFrame f, Vector3 shoulderR, Vector3 shoulderL, float dt)
+        private void UpdateOneHand(Transform control, RotorFrame f, Vector3 shoulderR, Vector3 shoulderL, float nearHandReach, float dt)
         {
             bool first = _oneHand == 0;
             if (first)
             {
                 Vector3 wantR, wantL;
-                _oneHand = OneHandFarthest(f, shoulderR, shoulderL, out wantR, out wantL) ? 1 : -1;
+                _oneHand = PickOneHand(f, shoulderR, shoulderL, nearHandReach, out wantR, out wantL) ? 1 : -1;
                 _handleR = _handleL = -1;
                 _regripR = _regripL = 0f;
             }
@@ -630,15 +631,32 @@ namespace SailwindPlayerModel
         }
 
         /// <summary>
-        /// The farthest each hand would be carried steering alone. True when the right hand has the shorter reach. A tie
+        /// Which hand steers alone, true for the right, and the farthest each hand would be carried doing it. The hand nearer
+        /// the wheel takes it. If that hand would be carried past <paramref name="nearHandReach"/>, the one with the shorter
+        /// reach takes it instead, so a seat that can only reach the wheel with the other hand still keeps you seated. A tie
         /// goes to the right, so a seat square behind the wheel steers the same on every machine.
         /// </summary>
-        private static bool OneHandFarthest(RotorFrame f, Vector3 shoulderR, Vector3 shoulderL, out Vector3 wantR, out Vector3 wantL)
+        private static bool PickOneHand(RotorFrame f, Vector3 shoulderR, Vector3 shoulderL, float nearHandReach,
+            out Vector3 wantR, out Vector3 wantL)
         {
             float idealR = OneHandIdeal(f, shoulderR, true), idealL = OneHandIdeal(f, shoulderL, false);
             wantR = FarthestOnArc(f, f.GripR * f.Scale, shoulderR, idealR - OneHandArcDeg, idealR + OneHandArcDeg);
             wantL = FarthestOnArc(f, f.GripR * f.Scale, shoulderL, idealL - OneHandArcDeg, idealL + OneHandArcDeg);
-            return Vector3.Distance(shoulderR, wantR) <= Vector3.Distance(shoulderL, wantL) + 0.001f;
+            float reachR = Vector3.Distance(shoulderR, wantR), reachL = Vector3.Distance(shoulderL, wantL);
+            bool nearer = WheelDistance(f, shoulderR) <= WheelDistance(f, shoulderL) + 0.001f;
+            if ((nearer ? reachR : reachL) <= nearHandReach) return nearer;
+            return reachR <= reachL + 0.001f;
+        }
+
+        /// <summary>
+        /// How near a shoulder is to a wheel: its distance from the hub plus its distance from the wheel's plane. Sitting
+        /// off to one side, the hub tells the shoulders apart while the plane is the same distance from both. Turned to face
+        /// the hub, the plane tells them apart.
+        /// </summary>
+        private static float WheelDistance(RotorFrame f, Vector3 shoulder)
+        {
+            Vector3 d = shoulder - f.Hub;
+            return d.magnitude + Mathf.Abs(Vector3.Dot(d, f.Axis));
         }
 
         /// <summary>
@@ -705,10 +723,11 @@ namespace SailwindPlayerModel
         /// of the two, for the lean and the behind-the-seat test. Measured through the same frame the standing pose
         /// is built from, so the two can never disagree. False for a tiller and for anything with no handles to hold.
         /// <paramref name="side"/> is the hand already steering a wheel (see <see cref="OneHandSide"/>), which is then the
-        /// one measured; 0 measures the hand that would be chosen.
+        /// one measured; 0 measures the hand that would be chosen, with <paramref name="nearHandReach"/> as in
+        /// <see cref="PickOneHand"/>.
         /// </summary>
         public static bool MeasureSeated(Transform control, Vector3 shoulderMid, Vector3 shoulderRight, float shoulderHalf,
-            out float need, out Vector3 aim, int side = 0)
+            float nearHandReach, out float need, out Vector3 aim, int side = 0)
         {
             need = 0f;
             aim = shoulderMid;
@@ -721,10 +740,10 @@ namespace SailwindPlayerModel
             Vector3 handR = shoulderMid + shoulderRight * shoulderHalf;
             Vector3 handL = shoulderMid - shoulderRight * shoulderHalf;
             Vector3 wantR, wantL;
-            // A wheel from a seat is steered with whichever hand has the shorter reach, so that hand alone counts.
+            // A wheel from a seat is steered with one hand, so that hand alone counts.
             if (OneHanded(spec))
             {
-                bool rightHand = OneHandFarthest(f, handR, handL, out wantR, out wantL);
+                bool rightHand = PickOneHand(f, handR, handL, nearHandReach, out wantR, out wantL);
                 if (side != 0) rightHand = side > 0;
                 need = rightHand ? Vector3.Distance(handR, wantR) : Vector3.Distance(handL, wantL);
                 aim = rightHand ? wantR : wantL;
