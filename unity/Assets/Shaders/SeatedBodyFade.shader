@@ -4,8 +4,9 @@
 // Colors are built the way the game's SyntyStudios/CustomCharacter shader builds them. Its texture is a palette sheet,
 // and each mask channel is white except over the swatch cells one color property paints; a mesh part that samples a
 // cell takes that color. Channel to property was read off the game's own mask and base textures, whose cells carry the
-// default colors: Mask_01 R Primary, G body art emblems, B Secondary; Mask_02 R/G/B metal primary, secondary, dark;
-// Mask_03 R/G/B skin, scar, stubble; Mask_04 R/G/B leather primary, leather secondary, hair; Mask_05 R eyes.
+// default colors, and checked against the game's compiled shader: Mask_01 R Primary, G Secondary, B body art emblems;
+// Mask_02 R/G/B metal primary, secondary, dark; Mask_03 R/G/B skin, scar, stubble; Mask_04 R/G/B leather primary,
+// leather secondary, hair; Mask_05 R eyes.
 //
 // Built with Unity 2019.1.10f1, the game's own version, into the asset bundle SailwindPlayerModel embeds. Property names
 // match the game's shader so a body's material copies straight across.
@@ -39,6 +40,11 @@ Shader "SailwindPlayerModel/SeatedBodyFade"
         // World heights: fully see-through at and above _FadeTop, fully solid at and below _FadeBottom.
         _FadeTop ("Fade top (world Y)", Float) = 10000
         _FadeBottom ("Fade bottom (world Y)", Float) = 9999
+        _PatA ("Cloth pattern (type, size)", Vector) = (0, 0.5, 0, 0)
+        _PatAColor ("Cloth pattern color", Color) = (1, 1, 1, 1)
+        _PatB ("Trim pattern (type, size)", Vector) = (0, 0.5, 0, 0)
+        _PatBColor ("Trim pattern color", Color) = (1, 1, 1, 1)
+        _PatRange ("Part rest height range (w: placed)", Vector) = (0, 1, 0, 0)
     }
 
     CGINCLUDE
@@ -89,6 +95,7 @@ Shader "SailwindPlayerModel/SeatedBodyFade"
         CGPROGRAM
         #pragma surface surf Standard alpha:fade
         #pragma target 3.0
+        #include "BodyPattern.cginc"
 
         sampler2D _Texture, _Mask_01, _Mask_02, _Mask_03, _Mask_04, _Mask_05;
         fixed4 _Color_Primary, _Color_Secondary, _Color_Leather_Primary, _Color_Metal_Primary, _Color_Leather_Secondary,
@@ -105,31 +112,40 @@ Shader "SailwindPlayerModel/SeatedBodyFade"
         void surf(Input i, inout SurfaceOutputStandard o)
         {
             float2 uv = i.uv_Texture;
-            fixed4 m1 = tex2D(_Mask_01, uv);
-            fixed4 m2 = tex2D(_Mask_02, uv);
-            fixed4 m3 = tex2D(_Mask_03, uv);
-            fixed4 m4 = tex2D(_Mask_04, uv);
-            fixed4 m5 = tex2D(_Mask_05, uv);
+            // As the game's SyntyStudios/CustomCharacter builds it (read off its compiled shader): every texture at full
+            // resolution, each mask a hard switch at 0.5 except the eyes and the body art, in the game's order. Sampling the masks
+            // with mipmaps blended the base palette's light default colors into everything at a distance.
+            float4 uvl = float4(uv, 0, 0);
+            fixed4 m1 = tex2Dlod(_Mask_01, uvl);
+            fixed4 m2 = tex2Dlod(_Mask_02, uvl);
+            fixed4 m3 = tex2Dlod(_Mask_03, uvl);
+            fixed4 m4 = tex2Dlod(_Mask_04, uvl);
+            fixed4 m5 = tex2Dlod(_Mask_05, uvl);
+            fixed4 s1 = step(m1, 0.5), s2 = step(m2, 0.5), s3 = step(m3, 0.5), s4 = step(m4, 0.5);
 
-            fixed3 c = tex2D(_Texture, uv).rgb;
-            c = lerp(_Color_Primary.rgb, c, m1.r);
-            c = lerp(_Color_Secondary.rgb, c, m1.b);
-            c = lerp(_Color_Metal_Primary.rgb, c, m2.r);
-            c = lerp(_Color_Metal_Secondary.rgb, c, m2.g);
-            c = lerp(_Color_Metal_Dark.rgb, c, m2.b);
-            c = lerp(_Color_Skin.rgb, c, m3.r);
-            c = lerp(_Color_Scar.rgb, c, m3.g);
-            c = lerp(_Color_Stubble.rgb, c, m3.b);
-            c = lerp(_Color_Leather_Primary.rgb, c, m4.r);
-            c = lerp(_Color_Leather_Secondary.rgb, c, m4.g);
-            c = lerp(_Color_Hair.rgb, c, m4.b);
+            // The same patterns as PatternedBody, so a patterned shirt stays patterned in the seated view.
+            fixed3 primary, secondary;
+            PatColors(i.worldPos, _Color_Primary.rgb, _Color_Secondary.rgb, primary, secondary);
+
+            fixed3 c = tex2Dlod(_Texture, uvl).rgb;
+            c = lerp(c, primary, s1.r);
+            c = lerp(c, secondary, s1.g);
+            c = lerp(c, _Color_Leather_Primary.rgb, s4.r);
+            c = lerp(c, _Color_Leather_Secondary.rgb, s4.g);
+            c = lerp(c, _Color_Metal_Primary.rgb, s2.r);
+            c = lerp(c, _Color_Metal_Secondary.rgb, s2.g);
+            c = lerp(c, _Color_Metal_Dark.rgb, s2.b);
+            c = lerp(c, _Color_Hair.rgb, s4.b);
+            c = lerp(c, _Color_Skin.rgb, s3.r);
+            c = lerp(c, _Color_Stubble.rgb, s3.b);
+            c = lerp(c, _Color_Scar.rgb, s3.g);
             c = lerp(_Color_Eyes.rgb, c, m5.r);
-            c = lerp(c, _Color_BodyArt.rgb, (1 - m1.g) * _BodyArt_Amount);
+            c = lerp(c, _Color_BodyArt.rgb, (1 - m1.b) * _BodyArt_Amount);
 
             o.Albedo = c;
             o.Metallic = _Metallic;
             o.Smoothness = _Smoothness;
-            o.Emission = c * _Emission;
+            o.Emission = (1 - m5.r) * _Emission;
             o.Alpha = FadeAlpha(i.worldPos.y);
         }
         ENDCG

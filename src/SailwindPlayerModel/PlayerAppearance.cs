@@ -212,29 +212,37 @@ namespace SailwindPlayerModel
             public readonly string Label;
             public readonly string[] Props;       // every property the slot writes; restored from the template for value 0
             public readonly ColorOption[] Palette;
-            public readonly Action<Material, Color> Write;
-            public ColorSlot(string key, string label, string[] props, ColorOption[] palette, Action<Material, Color> write)
-            { Key = key; Label = label; Props = props; Palette = palette; Write = write; }
+            /// <summary>
+            /// Turn one chosen color into the shader properties it sets: (chosen, current skin, put). The same table
+            /// writes the body's material and a part's property block, so a part painted on its own shades its trim,
+            /// leather and metal exactly the way the whole body would.
+            /// </summary>
+            public readonly Action<Color, Color, Action<string, Color>> Expand;
+            /// <summary>Offered on a single part (cloth, trim, leather, metal). Skin and hair belong to the whole body.</summary>
+            public readonly bool PerPart;
+            public ColorSlot(string key, string label, string[] props, ColorOption[] palette,
+                Action<Color, Color, Action<string, Color>> expand, bool perPart)
+            { Key = key; Label = label; Props = props; Palette = palette; Expand = expand; PerPart = perPart; }
         }
 
         static readonly ColorOption[] ClothPalette =
         {
-            new ColorOption("White", 0.92f, 0.90f, 0.85f), new ColorOption("Cream", 0.90f, 0.84f, 0.68f),
+            new ColorOption("Linen", 0.92f, 0.90f, 0.85f), new ColorOption("Cream", 0.90f, 0.84f, 0.68f),
             new ColorOption("Sand", 0.80f, 0.70f, 0.52f),  new ColorOption("Tan", 0.66f, 0.52f, 0.36f),
-            new ColorOption("Brown", 0.45f, 0.32f, 0.22f), new ColorOption("Dark brown", 0.28f, 0.20f, 0.14f),
-            new ColorOption("Red", 0.70f, 0.18f, 0.16f),   new ColorOption("Maroon", 0.45f, 0.12f, 0.14f),
-            new ColorOption("Orange", 0.85f, 0.45f, 0.15f), new ColorOption("Mustard", 0.80f, 0.65f, 0.20f),
-            new ColorOption("Green", 0.25f, 0.50f, 0.25f), new ColorOption("Olive", 0.40f, 0.42f, 0.22f),
+            new ColorOption("Umber", 0.45f, 0.32f, 0.22f), new ColorOption("Coffee", 0.28f, 0.20f, 0.14f),
+            new ColorOption("Brick", 0.70f, 0.18f, 0.16f),   new ColorOption("Maroon", 0.45f, 0.12f, 0.14f),
+            new ColorOption("Pumpkin", 0.85f, 0.45f, 0.15f), new ColorOption("Mustard", 0.80f, 0.65f, 0.20f),
+            new ColorOption("Forest", 0.25f, 0.50f, 0.25f), new ColorOption("Olive", 0.40f, 0.42f, 0.22f),
             new ColorOption("Teal", 0.18f, 0.48f, 0.48f),  new ColorOption("Sky", 0.49f, 0.70f, 0.83f),
-            new ColorOption("Blue", 0.25f, 0.42f, 0.70f),  new ColorOption("Navy", 0.14f, 0.20f, 0.36f),
-            new ColorOption("Purple", 0.42f, 0.25f, 0.50f), new ColorOption("Grey", 0.55f, 0.55f, 0.55f),
+            new ColorOption("Denim", 0.25f, 0.42f, 0.70f),  new ColorOption("Navy", 0.14f, 0.20f, 0.36f),
+            new ColorOption("Plum", 0.42f, 0.25f, 0.50f), new ColorOption("Ash", 0.55f, 0.55f, 0.55f),
             new ColorOption("Charcoal", 0.25f, 0.25f, 0.27f), new ColorOption("Black", 0.10f, 0.10f, 0.11f),
         };
         static readonly ColorOption[] LeatherPalette =
         {
-            new ColorOption("Tan", 0.62f, 0.45f, 0.30f),   new ColorOption("Brown", 0.42f, 0.29f, 0.20f),
-            new ColorOption("Dark brown", 0.28f, 0.19f, 0.13f), new ColorOption("Red-brown", 0.48f, 0.22f, 0.16f),
-            new ColorOption("Black", 0.12f, 0.11f, 0.10f), new ColorOption("Grey", 0.40f, 0.38f, 0.36f),
+            new ColorOption("Tan", 0.62f, 0.45f, 0.30f),   new ColorOption("Saddle", 0.42f, 0.29f, 0.20f),
+            new ColorOption("Chocolate", 0.28f, 0.19f, 0.13f), new ColorOption("Oxblood", 0.48f, 0.22f, 0.16f),
+            new ColorOption("Black", 0.12f, 0.11f, 0.10f), new ColorOption("Smoke", 0.40f, 0.38f, 0.36f),
             new ColorOption("Olive", 0.36f, 0.36f, 0.24f),
         };
         static readonly ColorOption[] MetalPalette =
@@ -265,23 +273,36 @@ namespace SailwindPlayerModel
         public static readonly ColorSlot[] ColorSlots = new[]
         {
             new ColorSlot("c_skin", "Skin", new[] { "_Color_Skin", "_Color_Scar" }, SkinPalette,
-                (m, c) => { SetColor(m, "_Color_Skin", c); SetColor(m, "_Color_Scar", new Color(c.r * 0.95f, c.g * 0.72f, c.b * 0.66f)); }),
+                (c, skin, put) => { put("_Color_Skin", c); put("_Color_Scar", new Color(c.r * 0.95f, c.g * 0.72f, c.b * 0.66f)); },
+                perPart: false),
             new ColorSlot("c_hair", "Hair color", new[] { "_Color_Hair", "_Color_Stubble" }, HairPalette,
-                (m, c) =>
-                {
-                    SetColor(m, "_Color_Hair", c);
-                    var skin = m.HasProperty("_Color_Skin") ? m.GetColor("_Color_Skin") : c;
-                    SetColor(m, "_Color_Stubble", Color.Lerp(c, skin, 0.5f));
-                }),
+                (c, skin, put) => { put("_Color_Hair", c); put("_Color_Stubble", Color.Lerp(c, skin, 0.5f)); },
+                perPart: false),
             new ColorSlot("c_primary", "Cloth", new[] { "_Color_Primary" }, ClothPalette,
-                (m, c) => SetColor(m, "_Color_Primary", c)),
+                (c, skin, put) => put("_Color_Primary", c), perPart: true),
             new ColorSlot("c_secondary", "Trim", new[] { "_Color_Secondary" }, ClothPalette,
-                (m, c) => SetColor(m, "_Color_Secondary", c)),
+                (c, skin, put) => put("_Color_Secondary", c), perPart: true),
             new ColorSlot("c_leather", "Leather", new[] { "_Color_Leather_Primary", "_Color_Leather_Secondary" }, LeatherPalette,
-                (m, c) => { SetColor(m, "_Color_Leather_Primary", c); SetColor(m, "_Color_Leather_Secondary", Scale(c, 1.2f)); }),
+                (c, skin, put) => { put("_Color_Leather_Primary", c); put("_Color_Leather_Secondary", Scale(c, 1.2f)); },
+                perPart: true),
             new ColorSlot("c_metal", "Metal", new[] { "_Color_Metal_Primary", "_Color_Metal_Secondary", "_Color_Metal_Dark" }, MetalPalette,
-                (m, c) => { SetColor(m, "_Color_Metal_Primary", c); SetColor(m, "_Color_Metal_Secondary", Scale(c, 0.8f)); SetColor(m, "_Color_Metal_Dark", Scale(c, 0.45f)); }),
+                (c, skin, put) => { put("_Color_Metal_Primary", c); put("_Color_Metal_Secondary", Scale(c, 0.8f)); put("_Color_Metal_Dark", Scale(c, 0.45f)); },
+                perPart: true),
         };
+
+        /// <summary>
+        /// Rows that can be painted on their own: the clothing and gear. Head, hair, eyebrows and facial hair carry
+        /// skin and hair colors, which belong to the whole body, and gender is not a part.
+        /// </summary>
+        public static bool IsPaintable(int slot)
+        {
+            if (slot < 0 || slot >= Slots.Length) return false;
+            switch (Slots[slot].Key)
+            {
+                case "gender": case "head": case "hair": case "eyebrow": case "facialhair": return false;
+                default: return true;
+            }
+        }
 
         public static int ColorSlotCount { get { return ColorSlots.Length; } }
 
@@ -319,7 +340,14 @@ namespace SailwindPlayerModel
             var slot = ColorSlots[colorSlot];
             var m = BodyTemplate.SharedMaterial;
             if (m == null || slot.Props.Length == 0 || !m.HasProperty(slot.Props[0])) return 0;
-            var c = m.GetColor(slot.Props[0]);
+            return NearestPaletteIndex(colorSlot, m.GetColor(slot.Props[0]));
+        }
+
+        /// <summary>The palette entry closest to a color, 1-based; 0 for an unknown slot.</summary>
+        public static int NearestPaletteIndex(int colorSlot, Color c)
+        {
+            if (colorSlot < 0 || colorSlot >= ColorSlots.Length) return 0;
+            var slot = ColorSlots[colorSlot];
             int best = 0; float bestD = float.MaxValue;
             for (int i = 0; i < slot.Palette.Length; i++)
             {
@@ -336,6 +364,26 @@ namespace SailwindPlayerModel
         /// <summary>Per-color-slot palette index, 0 = as the cloned NPC wears it. Null/short = all zero.</summary>
         public byte[] Colors;
 
+        // ---- stubble -------------------------------------------------------------------------------------
+        // The shadow of a shave on a male head is a region of the shared atlas, tinted by _Color_Stubble. 0 keeps the
+        // shade the hair color gives it (every look saved before this existed), 1 is a light shadow, 2 none: the
+        // region takes the skin color. Saved as "stubble=N", only when not 0, so older builds skip it.
+
+        /// <summary>0 full, 1 light, 2 none.</summary>
+        public byte Stubble;
+
+        public static readonly string[] StubbleNames = { "Full", "Light", "None" };
+        private const string StubbleKey = "stubble";
+
+        /// <summary>Lighten or remove the stubble the hair color (or the cloned NPC) just set. Runs after the hair.</summary>
+        private void ApplyStubble(Material mat)
+        {
+            if (Stubble == 0 || !mat.HasProperty("_Color_Stubble") || !mat.HasProperty("_Color_Skin")) return;
+            Color skin = mat.GetColor("_Color_Skin");
+            Color full = mat.GetColor("_Color_Stubble");
+            SetColor(mat, "_Color_Stubble", Stubble >= 2 ? skin : Color.Lerp(full, skin, 0.6f));
+        }
+
         public byte GetColor(int i)
         {
             return (Colors != null && i >= 0 && i < Colors.Length) ? Colors[i] : (byte)0;
@@ -350,6 +398,291 @@ namespace SailwindPlayerModel
                 Colors = next;
             }
             if (i >= 0 && i < Colors.Length) Colors[i] = value;
+        }
+
+        // ---- custom colors -------------------------------------------------------------------------------
+        // Any color, not only the palette's, for the whole body (Rgb) and for one part (PartRgb). Alpha 0 is "not set".
+        // A whole-body custom color keeps the nearest palette entry in Colors too, so a build or a crewmate that only
+        // knows the palette still shows something close. Saved as extra keys that older builds skip.
+
+        /// <summary>Per color slot, a custom color for the whole body. Alpha 0 = use Colors. Null/short = none set.</summary>
+        public Color32[] Rgb;
+
+        /// <summary>Per part and color slot, [slot * ColorSlotCount + colorSlot]. Alpha 0 = the body's color.</summary>
+        public Color32[] PartRgb;
+
+        public bool TryGetRgb(int colorSlot, out Color32 c)
+        {
+            c = default(Color32);
+            if (Rgb == null || colorSlot < 0 || colorSlot >= Rgb.Length || Rgb[colorSlot].a == 0) return false;
+            c = Rgb[colorSlot];
+            return true;
+        }
+
+        /// <summary>Set (or with null, clear) a whole-body custom color. Setting one also points Colors at its nearest entry.</summary>
+        public void SetRgb(int colorSlot, Color32? c)
+        {
+            if (colorSlot < 0 || colorSlot >= ColorSlots.Length) return;
+            SetRgbRaw(colorSlot, c);
+            if (c.HasValue) SetColor(colorSlot, (byte)NearestPaletteIndex(colorSlot, (Color)c.Value));
+        }
+
+        private void SetRgbRaw(int colorSlot, Color32? c)
+        {
+            if (colorSlot < 0 || colorSlot >= ColorSlots.Length) return;
+            if (Rgb == null || Rgb.Length < ColorSlots.Length)
+            {
+                if (!c.HasValue) return;
+                var next = new Color32[ColorSlots.Length];
+                if (Rgb != null) Array.Copy(Rgb, next, Math.Min(Rgb.Length, next.Length));
+                Rgb = next;
+            }
+            Rgb[colorSlot] = c.HasValue ? Opaque(c.Value) : default(Color32);
+        }
+
+        public bool TryGetPartRgb(int slot, int colorSlot, out Color32 c)
+        {
+            c = default(Color32);
+            int k = PartIndex(slot, colorSlot);
+            if (k < 0 || PartRgb == null || k >= PartRgb.Length || PartRgb[k].a == 0) return false;
+            c = PartRgb[k];
+            return true;
+        }
+
+        /// <summary>Paint one part's color slot (null goes back to the body's color). Only paintable parts and per-part slots.</summary>
+        public void SetPartRgb(int slot, int colorSlot, Color32? c)
+        {
+            int k = PartIndex(slot, colorSlot);
+            if (k < 0 || !IsPaintable(slot) || !ColorSlots[colorSlot].PerPart) return;
+            int size = Slots.Length * ColorSlots.Length;
+            if (PartRgb == null || PartRgb.Length < size)
+            {
+                if (!c.HasValue) return;
+                var next = new Color32[size];
+                if (PartRgb != null) Array.Copy(PartRgb, next, Math.Min(PartRgb.Length, next.Length));
+                PartRgb = next;
+            }
+            PartRgb[k] = c.HasValue ? Opaque(c.Value) : default(Color32);
+        }
+
+        /// <summary>True if any of this part's colors is painted on its own.</summary>
+        public bool HasPartColors(int slot)
+        {
+            for (int i = 0; i < ColorSlots.Length; i++)
+            {
+                Color32 c;
+                if (TryGetPartRgb(slot, i, out c)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>Drop every custom color, whole-body and per-part. The palette picks stay.</summary>
+        public void ClearCustomColors()
+        {
+            Rgb = null;
+            PartRgb = null;
+            PatBody = null;
+            PatPart = null;
+        }
+
+        /// <summary>
+        /// The color a whole-body slot shows: the custom color, else the palette entry, else what the cloned NPC wears.
+        /// False only when none of those can be known yet (no template).
+        /// </summary>
+        public bool TryGetBodyColor(int colorSlot, out Color c)
+        {
+            c = Color.white;
+            if (colorSlot < 0 || colorSlot >= ColorSlots.Length) return false;
+            Color32 custom;
+            if (TryGetRgb(colorSlot, out custom)) { c = custom; return true; }
+            int v = GetColor(colorSlot);
+            var p = ColorSlots[colorSlot].Palette;
+            if (v > 0 && v <= p.Length) { c = p[v - 1].Color; return true; }
+            var m = BodyTemplate.SharedMaterial;
+            var props = ColorSlots[colorSlot].Props;
+            if (m == null || props.Length == 0 || !m.HasProperty(props[0])) return false;
+            c = m.GetColor(props[0]);
+            c.a = 1f;
+            return true;
+        }
+
+        private static int PartIndex(int slot, int colorSlot)
+        {
+            if (slot < 0 || slot >= Slots.Length || colorSlot < 0 || colorSlot >= ColorSlots.Length) return -1;
+            return slot * ColorSlots.Length + colorSlot;
+        }
+
+        // ---- patterns ----------------------------------------------------------------------------------------
+        // A pattern over the cloth or trim color: stripes, pinstripes, checks, plaid or a fade, in a second color and one
+        // a size from small to large. Drawn by the PatternedBody shader (see BodyPattern.cginc), which a body switches to only while
+        // its look has one. Like the custom colors, whole-body (PatBody) or for one part (PatPart), saved as extra keys
+        // ("c_primary_pat=stripes,2,1A2B3C", "torso.c_primary_pat=none,2,000000") that older builds skip.
+        //
+        // A part's entry, when there is one, replaces the body's, so a part can also be set to None under a striped body.
+
+        /// <summary>One pattern choice. Set is false for "no entry": the body's pattern for a part, none for the body.</summary>
+        public struct Pattern
+        {
+            public bool Set;
+            public byte Type;     // index into PatternKeys; 0 is none. The shader's type numbers are the same.
+            public byte Size;     // 0 small to 255 large; the shader gets Size / 255
+            public Color32 Color;
+        }
+
+        /// <summary>Saved tokens, in the shader's type order. NEVER reordered or renamed once shipped.</summary>
+        public static readonly string[] PatternKeys =
+        {
+            "none", "stripes", "pinstripes", "checks", "plaid", "fade",
+            "breton", "diagonal", "chevron", "diamonds", "argyle", "gingham", "windowpane", "waves", "dots", "halves", "quartered",
+        };
+        public static readonly string[] PatternNames =
+        {
+            "None", "Stripes", "Pinstripes", "Checks", "Plaid", "Fade",
+            "Breton", "Diagonal", "Chevron", "Diamonds", "Argyle", "Gingham", "Windowpane", "Waves", "Dots", "Halves", "Quartered",
+        };
+
+        /// <summary>Pattern entries, per color slot for the whole body. Null/short = none.</summary>
+        public Pattern[] PatBody;
+
+        /// <summary>Pattern entries per part and color slot, [slot * ColorSlotCount + colorSlot]. Null/short = none.</summary>
+        public Pattern[] PatPart;
+
+        /// <summary>Cloth and trim take patterns. The shader has room for exactly these two.</summary>
+        public static bool TakesPattern(int colorSlot)
+        {
+            if (colorSlot < 0 || colorSlot >= ColorSlots.Length) return false;
+            var k = ColorSlots[colorSlot].Key;
+            return k == "c_primary" || k == "c_secondary";
+        }
+
+        public bool TryGetBodyPattern(int colorSlot, out Pattern p)
+        {
+            p = default(Pattern);
+            if (PatBody == null || colorSlot < 0 || colorSlot >= PatBody.Length || !PatBody[colorSlot].Set) return false;
+            p = PatBody[colorSlot];
+            return true;
+        }
+
+        public void SetBodyPattern(int colorSlot, Pattern? p)
+        {
+            if (!TakesPattern(colorSlot)) return;
+            if (PatBody == null || PatBody.Length < ColorSlots.Length)
+            {
+                if (!p.HasValue) return;
+                var next = new Pattern[ColorSlots.Length];
+                if (PatBody != null) Array.Copy(PatBody, next, Math.Min(PatBody.Length, next.Length));
+                PatBody = next;
+            }
+            PatBody[colorSlot] = p.HasValue ? Clean(p.Value) : default(Pattern);
+        }
+
+        public bool TryGetPartPattern(int slot, int colorSlot, out Pattern p)
+        {
+            p = default(Pattern);
+            int k = PartIndex(slot, colorSlot);
+            if (k < 0 || PatPart == null || k >= PatPart.Length || !PatPart[k].Set) return false;
+            p = PatPart[k];
+            return true;
+        }
+
+        public void SetPartPattern(int slot, int colorSlot, Pattern? p)
+        {
+            int k = PartIndex(slot, colorSlot);
+            if (k < 0 || !IsPaintable(slot) || !TakesPattern(colorSlot)) return;
+            int size = Slots.Length * ColorSlots.Length;
+            if (PatPart == null || PatPart.Length < size)
+            {
+                if (!p.HasValue) return;
+                var next = new Pattern[size];
+                if (PatPart != null) Array.Copy(PatPart, next, Math.Min(PatPart.Length, next.Length));
+                PatPart = next;
+            }
+            PatPart[k] = p.HasValue ? Clean(p.Value) : default(Pattern);
+        }
+
+        /// <summary>The pattern a part shows in a color slot: its own entry, else the body's. Type 0 for none.</summary>
+        public Pattern EffectivePattern(int slot, int colorSlot)
+        {
+            Pattern p;
+            if (TryGetPartPattern(slot, colorSlot, out p)) return p;
+            if (TryGetBodyPattern(colorSlot, out p)) return p;
+            return default(Pattern);
+        }
+
+        /// <summary>True if this part has a pattern entry of its own (None included).</summary>
+        public bool HasPartPatterns(int slot)
+        {
+            for (int i = 0; i < ColorSlots.Length; i++)
+            {
+                Pattern p;
+                if (TryGetPartPattern(slot, i, out p)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>True if any part could show a pattern, which is when a body needs the patterned shader.</summary>
+        public bool HasAnyPattern()
+        {
+            if (PatBody != null) foreach (var p in PatBody) if (p.Set && p.Type > 0) return true;
+            if (PatPart != null) foreach (var p in PatPart) if (p.Set && p.Type > 0) return true;
+            return false;
+        }
+
+        private static Pattern Clean(Pattern p)
+        {
+            return new Pattern
+            {
+                Set = true,
+                Type = p.Type < PatternKeys.Length ? p.Type : (byte)0,
+                Size = p.Size,
+                Color = Opaque(p.Color),
+            };
+        }
+
+        private static string FormatPattern(Pattern p)
+        {
+            return PatternKeys[p.Type < PatternKeys.Length ? p.Type : 0] + "," + p.Size + "," + ToHex(p.Color);
+        }
+
+        private static bool TryParsePattern(string s, out Pattern p)
+        {
+            p = default(Pattern);
+            var parts = s.Split(',');
+            if (parts.Length != 3) return false;
+            int type = Array.IndexOf(PatternKeys, parts[0].Trim());
+            int size;
+            Color32 c;
+            if (type < 0 || !int.TryParse(parts[1].Trim(), out size) || !TryParseHex(parts[2], out c)) return false;
+            p = Clean(new Pattern { Type = (byte)type, Size = (byte)Mathf.Clamp(size, 0, 255), Color = c });
+            return true;
+        }
+
+        /// <summary>
+        /// Put a pattern's type, size and color into a material or a property block, as the shader's _PatA (cloth) or
+        /// _PatB (trim).
+        /// </summary>
+        private static void PutPattern(int colorSlot, Pattern p, Action<string, Vector4> vec, Action<string, Color> col)
+        {
+            string name = ColorSlots[colorSlot].Key == "c_primary" ? "_PatA" : "_PatB";
+            vec(name, new Vector4(p.Set ? p.Type : 0, p.Size / 255f, 0, 0));
+            col(name + "Color", (Color)p.Color);
+        }
+
+        private static Color32 Opaque(Color32 c) { return new Color32(c.r, c.g, c.b, 255); }
+
+        public static string ToHex(Color32 c) { return c.r.ToString("X2") + c.g.ToString("X2") + c.b.ToString("X2"); }
+
+        public static bool TryParseHex(string s, out Color32 c)
+        {
+            c = default(Color32);
+            if (s == null) return false;
+            s = s.Trim();
+            if (s.StartsWith("#", StringComparison.Ordinal)) s = s.Substring(1);
+            if (s.Length != 6) return false;
+            int v;
+            if (!int.TryParse(s, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out v)) return false;
+            c = new Color32((byte)(v >> 16), (byte)(v >> 8), (byte)v, 255);
+            return true;
         }
 
         public static PlayerAppearance Default()
@@ -642,6 +975,7 @@ namespace SailwindPlayerModel
                 SanitizeIndices(c);
 
                 ApplyColors(c);
+                ApplyPartColors(c);
             }
             catch (Exception e)
             {
@@ -706,18 +1040,165 @@ namespace SailwindPlayerModel
             var mat = EnsureOwnMaterial(c);
             if (mat == null) return;
             var src = BodyTemplate.SharedMaterial;
+            Action<string, Color> put = (p, col) => SetColor(mat, p, col);
             for (int i = 0; i < ColorSlots.Length; i++)
             {
                 var slot = ColorSlots[i];
+                Color32 custom;
                 int v = GetColor(i);
-                if (v <= 0 || v > slot.Palette.Length)
+                Color chosen;
+                if (TryGetRgb(i, out custom)) chosen = custom;
+                else if (v > 0 && v <= slot.Palette.Length) chosen = slot.Palette[v - 1].Color;
+                else
                 {
                     // As cloned: put back what the NPC wears, so stepping back to 0 is not "keep the last pick".
                     foreach (var p in slot.Props)
                         if (mat.HasProperty(p) && src.HasProperty(p)) mat.SetColor(p, src.GetColor(p));
                     continue;
                 }
-                slot.Write(mat, slot.Palette[v - 1].Color);
+                // Skin is written before hair, so the stubble blend reads the skin just set.
+                slot.Expand(chosen, SkinOf(mat, chosen), put);
+            }
+            ApplyStubble(mat);
+            ApplyPatternShader(c, mat, src);
+        }
+
+        /// <summary>
+        /// Switch the body's material to the patterned shader while the look has a pattern, and back to the game's own
+        /// when it has none, so a look without patterns renders exactly as before. The property names match, so the
+        /// colors carry across the swap. The body-wide patterns go on the material; parts with their own are handled by
+        /// ApplyPartColors, and BodyPatterns keeps each part's pattern placed on its bone every frame.
+        /// </summary>
+        private void ApplyPatternShader(CharacterCustomizer c, Material mat, Material src)
+        {
+            bool want = HasAnyPattern();
+            Shader patterned = want ? BodyShaders.Patterned : null;   // only loads the bundle when a pattern is wanted
+            if (want && patterned != null)
+            {
+                if (mat.shader != patterned) mat.shader = patterned;
+                for (int i = 0; i < ColorSlots.Length; i++)
+                {
+                    if (!TakesPattern(i)) continue;
+                    Pattern p;
+                    TryGetBodyPattern(i, out p);   // default (none) when there is no entry
+                    PutPattern(i, p, (n, v) => mat.SetVector(n, v), (n, col) => mat.SetColor(n, col));
+                }
+                BodyPatterns.Track(c);
+            }
+            else
+            {
+                if (src != null && mat.shader != src.shader) mat.shader = src.shader;
+                BodyPatterns.Untrack(c);
+            }
+        }
+
+        private static Color SkinOf(Material m, Color fallback)
+        {
+            return m != null && m.HasProperty("_Color_Skin") ? m.GetColor("_Color_Skin") : fallback;
+        }
+
+        private static MaterialPropertyBlock _block;
+
+        /// <summary>
+        /// Paint parts on their own. Every part shares the body's one material, so a part's own colors go into a
+        /// MaterialPropertyBlock on its renderers instead: no material copies, and the seated first-person fade, which
+        /// swaps the material, keeps them because the block belongs to the renderer and the fade shader uses the same
+        /// property names. A renderer of a part with nothing painted has its block cleared, so a part put back to the
+        /// body's color really goes back. Nothing else in this mod uses property blocks on the body.
+        ///
+        /// The renderers are found through the part lists, every variant of the part and not only the one worn, so a
+        /// variant switched to later is already painted. The arms are part of the torso (they follow it). The hands are
+        /// the gloves': when gloves are picked, or when the Gloves row is painted while it matches the torso, since then
+        /// the hands are what that row's colors can only mean. Otherwise they are the torso's.
+        /// </summary>
+        private void ApplyPartColors(CharacterCustomizer c)
+        {
+            var mat = c.mat != null ? c.mat : BodyTemplate.SharedMaterial;
+            if (mat == null) return;
+            if (_block == null) _block = new MaterialPropertyBlock();
+            var g = Group(c);
+            int gloves = SlotIndex("gloves");
+            bool glovesOwnHands = gloves >= 0 && (this[gloves] != 0 || HasPartColors(gloves) || HasPartPatterns(gloves));
+            Color skin = SkinOf(mat, Color.white);
+            // HasAnyPattern first, so a look without patterns never loads the shader bundle.
+            bool patterned = HasAnyPattern() && BodyShaders.Patterned != null && mat.shader == BodyShaders.Patterned;
+
+            for (int s = 0; s < Slots.Length; s++)
+            {
+                if (!IsPaintable(s)) continue;
+                if (s == gloves && !glovesOwnHands) continue;   // the hands are the torso's then
+
+                var lists = new List<List<GameObject>>(6);
+                lists.Add(Slots[s].List(c));
+                if (Slots[s].PairList != null) lists.Add(Slots[s].PairList(c));
+                if (Slots[s].Key == "torso")
+                {
+                    lists.Add(g.arm_Upper_Right); lists.Add(g.arm_Upper_Left);
+                    lists.Add(g.arm_Lower_Right); lists.Add(g.arm_Lower_Left);
+                    if (!glovesOwnHands) { lists.Add(g.hand_Right); lists.Add(g.hand_Left); }
+                }
+
+                bool any = false;
+                _block.Clear();
+                for (int k = 0; k < ColorSlots.Length; k++)
+                {
+                    Color32 col;
+                    if (!ColorSlots[k].PerPart || !TryGetPartRgb(s, k, out col)) continue;
+                    any = true;
+                    ColorSlots[k].Expand(col, skin, (p, v) =>
+                    {
+                        if (!mat.HasProperty(p)) return;
+                        _block.SetColor(p, new Color(v.r, v.g, v.b, mat.GetColor(p).a));
+                    });
+                }
+                // The part's own patterns. Only while the patterned shader is on; otherwise nothing reads them.
+                if (patterned)
+                    for (int k = 0; k < ColorSlots.Length; k++)
+                    {
+                        Pattern pat;
+                        if (!TakesPattern(k) || !TryGetPartPattern(s, k, out pat)) continue;
+                        any = true;
+                        PutPattern(k, pat, (n, v) => _block.SetVector(n, v), (n, v) => _block.SetColor(n, v));
+                    }
+
+                foreach (var list in lists)
+                {
+                    if (list == null) continue;
+                    foreach (var go in list)
+                    {
+                        if (go == null) continue;
+                        var r = go.GetComponent<SkinnedMeshRenderer>();
+                        if (r == null) continue;
+                        if (any) r.SetPropertyBlock(_block);
+                        else if (r.HasPropertyBlock()) r.SetPropertyBlock(null);
+                    }
+                }
+            }
+        }
+
+        private static int SlotIndex(string key)
+        {
+            for (int i = 0; i < Slots.Length; i++) if (Slots[i].Key == key) return i;
+            return -1;
+        }
+
+        /// <summary>
+        /// Recolor a body that is already built, without rebuilding the model: for a color being dragged in the picker,
+        /// where a full restyle per frame would be wasted work. The parts worn must not have changed since the last
+        /// Apply. A seated first-person fade keeps its copy of the body's colors until the next full restyle; the
+        /// per-part colors reach it anyway. Never throws.
+        /// </summary>
+        public void ApplyColorsLive(CharacterCustomizer c)
+        {
+            if (c == null) return;
+            try
+            {
+                ApplyColors(c);
+                ApplyPartColors(c);
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning("[Appearance] Could not recolor: " + e.Message);
             }
         }
 
@@ -752,6 +1233,7 @@ namespace SailwindPlayerModel
             if (bodyClone == null) return;
             var c = bodyClone.GetComponentInChildren<CharacterCustomizer>(true);
             if (c != null) _hidesBeard.Remove(c.GetInstanceID());
+            BodyPatterns.Untrack(c);
         }
 
         /// <summary>
@@ -793,8 +1275,38 @@ namespace SailwindPlayerModel
             }
             for (int i = 0; i < ColorSlots.Length; i++)
                 sb.Append(';').Append(ColorSlots[i].Key).Append('=').Append(GetColor(i));
+            if (Stubble != 0) sb.Append(';').Append(StubbleKey).Append('=').Append(Stubble);
+            // Custom colors as extra keys: "c_primary_rgb=A1B2C3" for the whole body, "torso.c_primary=A1B2C3" for
+            // one part. A build that does not know them skips them and keeps the palette pick written above.
+            for (int i = 0; i < ColorSlots.Length; i++)
+            {
+                Color32 c;
+                if (TryGetRgb(i, out c)) sb.Append(';').Append(ColorSlots[i].Key).Append(RgbSuffix).Append('=').Append(ToHex(c));
+            }
+            for (int s = 0; s < Slots.Length; s++)
+                for (int i = 0; i < ColorSlots.Length; i++)
+                {
+                    Color32 c;
+                    if (TryGetPartRgb(s, i, out c))
+                        sb.Append(';').Append(Slots[s].Key).Append('.').Append(ColorSlots[i].Key).Append('=').Append(ToHex(c));
+                }
+            // Patterns, the same way: "c_primary_pat=stripes,2,1A2B3C" and "torso.c_primary_pat=none,2,000000".
+            for (int i = 0; i < ColorSlots.Length; i++)
+            {
+                Pattern p;
+                if (TryGetBodyPattern(i, out p)) sb.Append(';').Append(ColorSlots[i].Key).Append(PatSuffix).Append('=').Append(FormatPattern(p));
+            }
+            for (int s = 0; s < Slots.Length; s++)
+                for (int i = 0; i < ColorSlots.Length; i++)
+                {
+                    Pattern p;
+                    if (TryGetPartPattern(s, i, out p))
+                        sb.Append(';').Append(Slots[s].Key).Append('.').Append(ColorSlots[i].Key).Append(PatSuffix).Append('=').Append(FormatPattern(p));
+                }
             return sb.ToString();
         }
+
+        private const string RgbSuffix = "_rgb", PatSuffix = "_pat";
 
         public static PlayerAppearance Deserialize(string s)
         {
@@ -813,9 +1325,44 @@ namespace SailwindPlayerModel
                     int eq = pair.IndexOf('=');
                     if (eq <= 0 || eq >= pair.Length - 1) continue;
                     var key = pair.Substring(0, eq).Trim();
-                    int v;
-                    if (!int.TryParse(pair.Substring(eq + 1).Trim(), out v)) continue;
+                    var value = pair.Substring(eq + 1).Trim();
                     int slot;
+                    Color32 rgb;
+                    Pattern pat;
+                    // "torso.c_primary=A1B2C3" and "torso.c_primary_pat=...": one part on its own. The setters drop
+                    // anything not paintable or not patternable.
+                    int dot = key.IndexOf('.');
+                    if (dot > 0)
+                    {
+                        int part;
+                        if (!index.TryGetValue(key.Substring(0, dot), out part)) continue;
+                        string colorKey = key.Substring(dot + 1);
+                        if (colorKey.EndsWith(PatSuffix, StringComparison.Ordinal))
+                        {
+                            if (colorIndex.TryGetValue(colorKey.Substring(0, colorKey.Length - PatSuffix.Length), out slot) && TryParsePattern(value, out pat))
+                                a.SetPartPattern(part, slot, pat);
+                        }
+                        else if (colorIndex.TryGetValue(colorKey, out slot) && TryParseHex(value, out rgb))
+                            a.SetPartRgb(part, slot, rgb);
+                        continue;
+                    }
+                    // "c_primary_rgb=A1B2C3": a whole-body custom color. The palette key beside it is left as written.
+                    if (key.EndsWith(RgbSuffix, StringComparison.Ordinal))
+                    {
+                        if (colorIndex.TryGetValue(key.Substring(0, key.Length - RgbSuffix.Length), out slot) && TryParseHex(value, out rgb))
+                            a.SetRgbRaw(slot, rgb);
+                        continue;
+                    }
+                    // "c_primary_pat=stripes,2,1A2B3C": a whole-body pattern.
+                    if (key.EndsWith(PatSuffix, StringComparison.Ordinal))
+                    {
+                        if (colorIndex.TryGetValue(key.Substring(0, key.Length - PatSuffix.Length), out slot) && TryParsePattern(value, out pat))
+                            a.SetBodyPattern(slot, pat);
+                        continue;
+                    }
+                    int v;
+                    if (!int.TryParse(value, out v)) continue;
+                    if (key == StubbleKey) { a.Stubble = (byte)Mathf.Clamp(v, 0, StubbleNames.Length - 1); continue; }
                     if (colorIndex.TryGetValue(key, out slot)) { a.SetColor(slot, (byte)Mathf.Clamp(v, 0, 255)); continue; }
                     if (!index.TryGetValue(key, out slot)) continue; // slot from a newer build: ignore
                     a[slot] = (byte)Mathf.Clamp(v, 0, 255);

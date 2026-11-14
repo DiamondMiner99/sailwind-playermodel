@@ -73,6 +73,94 @@ namespace SailwindPlayerModel
         /// left stretched, which is what we wanted.
         /// </summary>
         public const float PanelStretchY = 1.2f;
+        /// <summary>
+        /// The layout above is designed for six buttons. Each button past six stretches the parchment by one more
+        /// step instead of squeezing the column, because squeezed plates overlapped and the bright edge of each plate
+        /// showed through the one below as a white line (co-op adds three buttons, so a host has eight). The panel's
+        /// Y scale goes from PanelStretchY up to this cap; past it the plates shrink to fit. The panel is also
+        /// raised so the scroll stays centered on screen at any stretch (RaisePanel).
+        /// </summary>
+        const float MaxStretchY = 1.75f;
+
+        // Grouped layout, in SCREEN units: local Y times the stretch, about 279 px each at 1080p. Everything here
+        // was measured off two 1080p screenshots (stretch 1.45 and 1.68, 2026-11-14), which agree: the scroll grows
+        // about a pivot 870 px down the screen, reaching 405 px per unit of stretch above it and 143 below, with
+        // the rollers' inner edges at 324 above and 72 below.
+        const float PxPerUnit = 279f;
+        const float PlateHeight = 0.258f;     // a full-size plate, 72 px
+        const float PlateScale = 0.9f;        // 65 px
+        const float InnerGap = 0.05f;         // 14 px between plates
+        // Paper style, 15% up from the design pass on request (2026-11-14): 67 px plates, 9 px gaps.
+        const float PaperPlateScale = 0.92f;
+        const float PaperGap = 0.033f;
+        const float RollerMargin = 0.129f;    // 36 px of parchment between the column and each roller
+        /// <summary>Parchment between the rollers, per unit of stretch: (324 + 72) px.</summary>
+        const float InnerPerStretch = 396f / PxPerUnit;
+        /// <summary>Middle of the space between the rollers, in panel-local units above the pivot: (324 - 72) / 2 px.</summary>
+        const float ColumnCenterLocal = 126f / PxPerUnit;
+        // Screen placement: pivot as built, screen middle, and the scroll's middle above the pivot per stretch.
+        const float PivotPx = 870f;
+        const float ScreenMidPx = 540f;
+        const float ScrollMidPerStretchPx = 131f;
+        static Vector3 _panelBasePos;
+        static float _stretch = PanelStretchY;
+        static Vector3 _scrollScale = Vector3.one;
+
+        /// <summary>A sheet from CloneScroll, kept at the screen position and shape it was made with when the panel
+        /// stretches.</summary>
+        class ClonedSheet
+        {
+            public Transform T;
+            public Vector3 Pos;
+            public float Scale;
+            /// <summary>The scroll's own visible renderers (rollers, parchment), not what a mod hangs on it.</summary>
+            public HashSet<Renderer> Scroll;
+            /// <summary>Every renderer of the scroll, hidden ones too, so none of it is taken for a mod's content.</summary>
+            public HashSet<Renderer> ScrollAll;
+            public Paper Paper;
+        }
+
+        // ---- style ---------------------------------------------------------------------------------------
+
+        /// <summary>How the pause menu is drawn. Paper (default since 2026-11-14) hangs the buttons on a sheet like the
+        /// Sailwind banner; Scroll is the title menu's scroll. A screen-space panel and real scroll rollers were also
+        /// tried or considered that day and dropped.</summary>
+        public enum MenuStyle { Scroll, Paper }
+
+        internal static MenuStyle Style => BodyTuning.PauseMenuStyle != null ? BodyTuning.PauseMenuStyle.Value : MenuStyle.Paper;
+
+        /// <summary>
+        /// A flat sheet of the game's own button paper behind a group of plates: a clone of the button row with its
+        /// text and clicks removed and its emission (the only thing that colors that paper) set lighter, like the
+        /// shipyard's backing sheet. Measured once at unit scale, then scaled to whatever it backs.
+        /// </summary>
+        class Paper
+        {
+            public GameObject Go;
+            public Vector3 Center1;   // plate center at unit scale, panel-local, relative to the clone's position
+            public Vector2 Size1;     // plate size at unit scale, panel-local
+        }
+
+        // Paper style, from the 2026-11-14 design pass. The game's own paper materials (shipyard) have a BLACK base
+        // color, so emission alone sets the tone and scene light cannot wash it out; the sheet does the same.
+        static readonly Color PaperEmission = new Color(0.66f, 0.59f, 0.54f, 1f);   // parchment, about #A8978A
+        static readonly Color StripEmission = new Color(0.56f, 0.49f, 0.44f, 1f);   // folded ends, about #8E7D70
+        const float PaperMarginX = 0.165f;   // 46 px each side of the plates
+        const float PaperMarginY = 0.148f;   // 41 px above the first plate and below the last
+        const float SheetMargin = 0.072f;    // 20 px round a mod sheet's rows (co-op's crew list)
+        const float SheetGap = 0.057f;       // 16 px between the menu sheet and a mod sheet docked beside it
+        const float StripHeight = 0.100f;    // 28 px
+        const float StripShow = 0.036f;      // 10 px of strip beyond the sheet's top and bottom edges
+        const float StripOverhangX = 0.014f; // 4 px wider than the sheet each side
+        // In this rig a SMALLER panel-local z is nearer the camera (found 2026-11-14: a sheet placed at the plates'
+        // min z minus a bit covered them). Paper goes at max z plus this; the end strips one step further back.
+        const float PaperBehind = 0.01f;
+        static Paper _stripTop, _stripBottom;
+        // Mod sheet rows whose plates the Paper style hides (names are not buttons), to restore exactly those.
+        static readonly HashSet<Renderer> _sheetHiddenPlates = new HashSet<Renderer>();
+        static readonly HashSet<Renderer> _mainScroll = new HashSet<Renderer>();
+        static Paper _mainPaper;
+        static readonly List<ClonedSheet> _sheets = new List<ClonedSheet>();
 
         // ---- state -------------------------------------------------------------------------------------
 
@@ -302,9 +390,13 @@ namespace SailwindPlayerModel
                 _panel = UnityEngine.Object.Instantiate(startUI.gameObject, startMenu.transform);
                 _panel.name = "modpause_panel";
                 _panel.transform.localPosition = startUI.localPosition;
+                _panelBasePos = startUI.localPosition;
                 _panel.transform.localRotation = startUI.localRotation;
-                var scrollScale = startUI.localScale;
-                _panel.transform.localScale = new Vector3(scrollScale.x, scrollScale.y * PanelStretchY, scrollScale.z);
+                _scrollScale = startUI.localScale;
+                _stretch = PanelStretchY;
+                _sheets.Clear();
+                _panel.transform.localScale = new Vector3(_scrollScale.x, _scrollScale.y * _stretch, _scrollScale.z);
+                RaisePanel();
 
                 var template = MenuUtil.FindChild(_panel.transform, "button new game");
                 if (template == null)
@@ -325,6 +417,8 @@ namespace SailwindPlayerModel
                     var btn = (smb.transform.parent != null) ? smb.transform.parent.gameObject : smb.gameObject;
                     if (!vanilla.Contains(btn)) vanilla.Add(btn);
                 }
+                CollectScroll(_panel.transform, vanilla, _mainScroll);
+                _mainPaper = _stripTop = _stripBottom = null;
 
                 // A private copy to build buttons from later. The row found above is one of the title buttons
                 // removed below, so it cannot serve as the template once this frame ends. The copy stays
@@ -399,15 +493,26 @@ namespace SailwindPlayerModel
             {
                 var scroll = UnityEngine.Object.Instantiate(_startUI.gameObject, _panel.transform);
                 scroll.name = name;
-                scroll.transform.localPosition = localPos;
                 scroll.transform.localRotation = Quaternion.identity; // inherit the panel's player-facing aim
-                // Counter the panel's vertical stretch so the extra sheet is not squashed.
-                scroll.transform.localScale = new Vector3(scale, scale / PanelStretchY, scale);
+                // Counter the panel's vertical stretch so the extra sheet is not squashed, and keep it where the
+                // caller put it when a long button list stretches the panel further (PlaceSheet).
+                var sheet = new ClonedSheet { T = scroll.transform, Pos = localPos, Scale = scale, Scroll = new HashSet<Renderer>(), ScrollAll = new HashSet<Renderer>() };
+                _sheets.Add(sheet);
+                PlaceSheet(sheet);
+                var stripped = new List<GameObject>();
                 foreach (var smb in scroll.GetComponentsInChildren<StartMenuButton>(true))
                 {
                     var btn = (smb.transform.parent != null) ? smb.transform.parent.gameObject : smb.gameObject;
-                    UnityEngine.Object.Destroy(btn);
+                    if (!stripped.Contains(btn)) stripped.Add(btn);
                 }
+                CollectScroll(scroll.transform, stripped, sheet.Scroll);
+                foreach (var r in scroll.GetComponentsInChildren<Renderer>(true))
+                {
+                    bool mine = true;
+                    foreach (var g in stripped) if (r.transform.IsChildOf(g.transform)) { mine = false; break; }
+                    if (mine) sheet.ScrollAll.Add(r);
+                }
+                foreach (var btn in stripped) UnityEngine.Object.Destroy(btn);
                 scroll.SetActive(false);
                 return scroll;
             }
@@ -587,6 +692,7 @@ namespace SailwindPlayerModel
             }
 
             LayoutButtons(); // re-stack the visible buttons so a hidden one closes the gap
+            ApplyStyle();
         }
 
         // ---- clicks ------------------------------------------------------------------------------------
@@ -686,35 +792,340 @@ namespace SailwindPlayerModel
         /// sat visibly high on the scroll while another looked right. That was once reported as a resolution
         /// difference between two machines, and both were 1920x1080; it was the button count all along.
         ///
-        /// The buttons also SHRINK as the column fills. The span is fixed, so each extra button shrinks the
-        /// step, which reads as crowded. Scaling the buttons is the only lever that changes the
-        /// gap-to-button ratio: stretching the parchment would squash these children, since they inherit its
-        /// scale, and scaling it uniformly magnifies the crowding along with everything else.
+        /// Evenly spaced; grouping by gaps was tried 2026-11-14 and dropped (small plates with big gaps looked
+        /// odd). Distances below are SCREEN units: local Y times the panel's stretch, so they stay the same on
+        /// screen whatever the stretch is.
+        ///
+        /// When the column is taller than the six-button design (BaseColumnExtent), the PARCHMENT grows to hold
+        /// it, up to MaxStretchY, and every child is counter-scaled by the current stretch so plates and sheets
+        /// keep their shape. Past the cap, plates and gaps shrink together so nothing overlaps or leaves the
+        /// scroll.
         /// </summary>
         static void LayoutButtons()
         {
             if (_panel == null) return;
 
-            int visible = 0;
+            _visibleScratch.Clear();
             for (int i = 0; i < _entries.Count; i++)
             {
                 var b = MenuUtil.FindChild(_panel.transform, _entries[i].Id);
-                if (b != null && b.gameObject.activeSelf) visible++;
+                if (b != null && b.gameObject.activeSelf) _visibleScratch.Add(b);
             }
-            float step = visible > 1 ? Mathf.Min(ColStep, ColSpan / (visible - 1)) : ColStep;
-            float scale = Mathf.Clamp(BodyTuning.MenuButtonScale != null ? BodyTuning.MenuButtonScale.Value : 1f, 0.5f, 1f);
-            float top = ColCenterY + step * (visible - 1) * 0.5f;
+            int visible = _visibleScratch.Count;
+            if (visible == 0) return;
 
-            int n = 0;
-            for (int i = 0; i < _entries.Count; i++)
+            bool paperLayout = Style == MenuStyle.Paper;
+            float scale = (paperLayout ? PaperPlateScale : PlateScale) * Mathf.Clamp(BodyTuning.MenuButtonScale != null ? BodyTuning.MenuButtonScale.Value : 1f, 0.5f, 1f);
+            float plate = PlateHeight * scale;
+
+            // Offsets of each plate's center from the first one, in screen units at full size.
+            _offsetScratch.Clear();
+            float off = 0f;
+            for (int i = 0; i < visible; i++)
             {
-                var b = MenuUtil.FindChild(_panel.transform, _entries[i].Id);
-                if (b == null || !b.gameObject.activeSelf) continue;
-                b.localPosition = new Vector3(ColX, top - step * n, ColZ);
-                // Undo the parchment's vertical stretch so the button plate stays square.
-                b.localScale = new Vector3(scale, scale / PanelStretchY, scale);
-                n++;
+                if (i > 0) off += plate + (paperLayout ? PaperGap : InnerGap);
+                _offsetScratch.Add(off);
             }
+            float extent = off + plate;
+
+            // Grow the parchment until the space between the rollers holds the column plus a margin at each end.
+            float needed = (extent + 2f * RollerMargin) / InnerPerStretch;
+            float newStretch = Mathf.Clamp(needed, PanelStretchY, MaxStretchY);
+            float shrink = needed > MaxStretchY ? MaxStretchY / needed : 1f;
+            scale *= shrink;
+
+            if (!Mathf.Approximately(newStretch, _stretch))
+            {
+                _stretch = newStretch;
+                _panel.transform.localScale = new Vector3(_scrollScale.x, _scrollScale.y * _stretch, _scrollScale.z);
+                RaisePanel();
+                for (int i = _sheets.Count - 1; i >= 0; i--)
+                {
+                    if (_sheets[i].T == null) { _sheets.RemoveAt(i); continue; }
+                    PlaceSheet(_sheets[i]);
+                }
+            }
+
+            // Centered on the column midpoint; screen units back to local by dividing by the stretch.
+            float half = off * shrink * 0.5f;
+            for (int i = 0; i < visible; i++)
+            {
+                var b = _visibleScratch[i];
+                float y = ColumnCenterLocal + (half - _offsetScratch[i] * shrink) / _stretch;
+                b.localPosition = new Vector3(ColX, y, ColZ);
+                // Undo the parchment's vertical stretch so the button plate stays square.
+                b.localScale = new Vector3(scale, scale / _stretch, scale);
+            }
+        }
+
+        /// <summary>
+        /// Moves the panel up so the scroll's middle sits on the screen's middle. As built it hangs low, with its
+        /// pivot 870 px down a 1080 px screen. The parent is StartMenu, which MoveMenuToPlayer turns to the
+        /// camera, so its local Y is screen up, and one screen unit is _scrollScale.y of its local units.
+        /// </summary>
+        static void RaisePanel()
+        {
+            float px = PivotPx - ScreenMidPx - ScrollMidPerStretchPx * _stretch;
+            _panel.transform.localPosition = _panelBasePos + Vector3.up * (px / PxPerUnit * _scrollScale.y);
+        }
+
+        static readonly List<Transform> _visibleScratch = new List<Transform>();
+        static readonly List<float> _offsetScratch = new List<float>();
+
+        // ---- style application --------------------------------------------------------------------------
+
+        static void CollectScroll(Transform root, List<GameObject> exclude, HashSet<Renderer> into)
+        {
+            into.Clear();
+            foreach (var r in root.GetComponentsInChildren<Renderer>(true))
+            {
+                if (!r.enabled) continue;
+                bool skip = false;
+                foreach (var g in exclude)
+                    if (g != null && r.transform.IsChildOf(g.transform)) { skip = true; break; }
+                if (!skip) into.Add(r);
+            }
+        }
+
+        static void SetRenderers(HashSet<Renderer> set, bool on)
+        {
+            foreach (var r in set) if (r != null && r.enabled != on) r.enabled = on;
+        }
+
+        /// <summary>Runs after every layout. Scroll: the vanilla look. Paper: the scroll hidden, the plates on a sheet
+        /// of the game's button paper with darker folded ends, and mod sheets (co-op's crew list) as plain paper tags
+        /// whose rows are text only, since names are not buttons.</summary>
+        static void ApplyStyle()
+        {
+            var style = Style;
+            bool paperStyle = style == MenuStyle.Paper;
+            SetRenderers(_mainScroll, !paperStyle);
+            UpdatePaper(ref _mainPaper, paperStyle, _visibleScratch, PaperMarginX, PaperMarginY / _stretch, PaperEmission);
+            UpdateStrips(paperStyle);
+            if (!paperStyle) RestoreSheetPlates();
+
+            // Where a mod sheet docks in Paper style: right of the menu sheet, its first row level with the first plate.
+            Vector3 mainMin, mainMax = Vector3.zero;
+            bool dock = paperStyle && _mainPaper != null && _mainPaper.Go != null && _mainPaper.Go.activeSelf
+                        && PlateBounds(_visibleScratch, out mainMin, out mainMax);
+            float dockLeft = 0f, dockTop = 0f;
+            if (dock)
+            {
+                var mt = _mainPaper.Go.transform;
+                float right = mt.localPosition.x + (_mainPaper.Center1.x + _mainPaper.Size1.x * 0.5f) * mt.localScale.x;
+                dockLeft = right + SheetGap + SheetMargin;
+                dockTop = mainMax.y;
+            }
+
+            for (int i = _sheets.Count - 1; i >= 0; i--)
+            {
+                var sh = _sheets[i];
+                if (sh.T == null)
+                {
+                    if (sh.Paper != null && sh.Paper.Go != null) UnityEngine.Object.Destroy(sh.Paper.Go);
+                    _sheets.RemoveAt(i);
+                    continue;
+                }
+                bool paper = paperStyle;
+                bool shown = sh.T.gameObject.activeSelf;
+                SetRenderers(sh.Scroll, !paper);
+                if (!paper) PlaceSheet(sh); // back where its mod put it
+                _rowScratch.Clear();
+                if (paper && shown)
+                {
+                    for (int c = 0; c < sh.T.childCount; c++)
+                    {
+                        var child = sh.T.GetChild(c);
+                        if (!child.gameObject.activeSelf || HoldsScroll(child, sh.ScrollAll)) continue;
+                        _rowScratch.Add(child);
+                        HideRowPlates(child);
+                    }
+                    if (dock && PlateBounds(_rowScratch, out var rowMin, out var rowMax))
+                    {
+                        var lp = sh.T.localPosition;
+                        sh.T.localPosition = new Vector3(lp.x + (dockLeft - rowMin.x), lp.y + (dockTop - rowMax.y), lp.z);
+                    }
+                }
+                UpdatePaper(ref sh.Paper, paper && shown, _rowScratch, SheetMargin, SheetMargin / _stretch, PaperEmission);
+            }
+        }
+
+        static readonly List<Transform> _rowScratch = new List<Transform>();
+        static readonly List<Transform> _rowScratch2 = new List<Transform>();
+
+        static bool HoldsScroll(Transform t, HashSet<Renderer> scroll)
+        {
+            foreach (var r in scroll) if (r != null && r.transform.IsChildOf(t)) return true;
+            return false;
+        }
+
+        static void HideRowPlates(Transform row)
+        {
+            foreach (var mr in row.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                if (mr.GetComponent<TextMesh>() != null || !mr.enabled) continue;
+                mr.enabled = false;
+                _sheetHiddenPlates.Add(mr);
+            }
+        }
+
+        static void RestoreSheetPlates()
+        {
+            if (_sheetHiddenPlates.Count == 0) return;
+            foreach (var r in _sheetHiddenPlates) if (r != null) r.enabled = true;
+            _sheetHiddenPlates.Clear();
+        }
+
+        /// <summary>The darker folded ends of the main sheet, behind it, showing StripShow beyond its top and bottom.</summary>
+        static void UpdateStrips(bool show)
+        {
+            bool on = show && _mainPaper != null && _mainPaper.Go != null && _mainPaper.Go.activeSelf;
+            if (!on)
+            {
+                if (_stripTop != null && _stripTop.Go != null && _stripTop.Go.activeSelf) _stripTop.Go.SetActive(false);
+                if (_stripBottom != null && _stripBottom.Go != null && _stripBottom.Go.activeSelf) _stripBottom.Go.SetActive(false);
+                return;
+            }
+            if (_stripTop == null || _stripTop.Go == null) _stripTop = MakePaper(StripEmission, "modpause_paper_strip_top");
+            if (_stripBottom == null || _stripBottom.Go == null) _stripBottom = MakePaper(StripEmission, "modpause_paper_strip_bottom");
+            if (_stripTop == null || _stripBottom == null) return;
+
+            // The main sheet's edges, from its own placement.
+            var t = _mainPaper.Go.transform;
+            float sx = t.localScale.x, sy = t.localScale.y;
+            float cx = t.localPosition.x + _mainPaper.Center1.x * sx;
+            float cy = t.localPosition.y + _mainPaper.Center1.y * sy;
+            float halfW = _mainPaper.Size1.x * sx * 0.5f, halfH = _mainPaper.Size1.y * sy * 0.5f;
+            float z = t.localPosition.z + _mainPaper.Center1.z + PaperBehind;
+            float h = StripHeight / _stretch, show2 = StripShow / _stretch;
+            float w = 2f * (halfW + StripOverhangX);
+            PlaceStrip(_stripTop, cx, cy + halfH + show2 - h * 0.5f, w, h, z);
+            PlaceStrip(_stripBottom, cx, cy - halfH - show2 + h * 0.5f, w, h, z);
+        }
+
+        static void PlaceStrip(Paper p, float cx, float cy, float w, float h, float z)
+        {
+            float sx = w / p.Size1.x, sy = h / p.Size1.y;
+            var t = p.Go.transform;
+            t.localScale = new Vector3(sx, sy, 1f);
+            t.localPosition = new Vector3(cx - p.Center1.x * sx, cy - p.Center1.y * sy, z - p.Center1.z);
+            if (!p.Go.activeSelf) p.Go.SetActive(true);
+        }
+
+        /// <summary>Sizes and places a paper sheet behind the plates of these rows, in panel-local space.</summary>
+        static void UpdatePaper(ref Paper p, bool show, List<Transform> rows, float marginX, float marginY, Color tint)
+        {
+            Vector3 min, max;
+            if (!show || rows.Count == 0 || !PlateBounds(rows, out min, out max))
+            {
+                if (p != null && p.Go != null && p.Go.activeSelf) p.Go.SetActive(false);
+                return;
+            }
+            if (p == null || p.Go == null) p = MakePaper(tint, "modpause_paper");
+            if (p == null) return;
+
+            float w = (max.x - min.x) + 2f * marginX;
+            float h = (max.y - min.y) + 2f * marginY;
+            float sx = w / p.Size1.x, sy = h / p.Size1.y;
+            var t = p.Go.transform;
+            t.localScale = new Vector3(sx, sy, 1f);
+            t.localPosition = new Vector3(
+                (min.x + max.x) * 0.5f - p.Center1.x * sx,
+                (min.y + max.y) * 0.5f - p.Center1.y * sy,
+                max.z + PaperBehind - p.Center1.z);
+            if (!p.Go.activeSelf) p.Go.SetActive(true);
+        }
+
+        static Paper MakePaper(Color tint, string name)
+        {
+            if (_buttonTemplate == null || _panel == null) return null;
+            try
+            {
+                var go = UnityEngine.Object.Instantiate(_buttonTemplate.gameObject, _panel.transform);
+                go.name = name;
+                foreach (var smb in go.GetComponentsInChildren<StartMenuButton>(true)) UnityEngine.Object.DestroyImmediate(smb);
+                foreach (var c in go.GetComponentsInChildren<Collider>(true)) UnityEngine.Object.DestroyImmediate(c);
+                foreach (var tm in go.GetComponentsInChildren<TextMesh>(true))
+                {
+                    tm.text = "";
+                    var tr = tm.GetComponent<Renderer>();
+                    if (tr != null) tr.enabled = false;
+                }
+                foreach (var mr in go.GetComponentsInChildren<MeshRenderer>(true))
+                {
+                    if (mr.GetComponent<TextMesh>() != null) continue;
+                    var m = mr.material;
+                    if (m == null) continue;
+                    if (m.HasProperty("_Color")) m.SetColor("_Color", Color.black);
+                    if (m.HasProperty("_EmissionColor")) m.SetColor("_EmissionColor", tint);
+                }
+                go.transform.localRotation = _buttonTemplate.localRotation;
+                go.transform.localScale = Vector3.one;
+                go.transform.localPosition = Vector3.zero;
+
+                _rowScratch2.Clear();
+                _rowScratch2.Add(go.transform);
+                Vector3 min, max;
+                if (!PlateBounds(_rowScratch2, out min, out max) || max.x - min.x < 1e-4f || max.y - min.y < 1e-4f)
+                {
+                    Plugin.Log.LogWarning("[PauseMenu] paper sheet: could not measure the button plate");
+                    UnityEngine.Object.Destroy(go);
+                    return null;
+                }
+                go.SetActive(false);
+                return new Paper
+                {
+                    Go = go,
+                    Center1 = (min + max) * 0.5f,
+                    Size1 = new Vector2(max.x - min.x, max.y - min.y),
+                };
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogError("[PauseMenu] paper sheet failed: " + e);
+                return null;
+            }
+        }
+
+        /// <summary>Panel-local bounds of the plate meshes (not the text) under these rows, enabled or not, so a
+        /// text-only row such as co-op's "Crew:" header still counts at a plate's size.</summary>
+        static bool PlateBounds(List<Transform> rows, out Vector3 min, out Vector3 max)
+        {
+            min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+            bool any = false;
+            var panel = _panel.transform;
+            foreach (var row in rows)
+            {
+                if (row == null) continue;
+                foreach (var mr in row.GetComponentsInChildren<MeshRenderer>(true))
+                {
+                    if (mr.GetComponent<TextMesh>() != null) continue;
+                    var mf = mr.GetComponent<MeshFilter>();
+                    if (mf == null || mf.sharedMesh == null) continue;
+                    var b = mf.sharedMesh.bounds;
+                    for (int k = 0; k < 8; k++)
+                    {
+                        var corner = new Vector3(
+                            (k & 1) == 0 ? b.min.x : b.max.x,
+                            (k & 2) == 0 ? b.min.y : b.max.y,
+                            (k & 4) == 0 ? b.min.z : b.max.z);
+                        var lp = panel.InverseTransformPoint(mr.transform.TransformPoint(corner));
+                        min = Vector3.Min(min, lp);
+                        max = Vector3.Max(max, lp);
+                    }
+                    any = true;
+                }
+            }
+            return any;
+        }
+
+        /// <summary>Puts a cloned sheet where it sits on screen at the base stretch, whatever the stretch is now.</summary>
+        static void PlaceSheet(ClonedSheet sheet)
+        {
+            float k = PanelStretchY / _stretch;
+            sheet.T.localPosition = new Vector3(sheet.Pos.x, sheet.Pos.y * k, sheet.Pos.z);
+            sheet.T.localScale = new Vector3(sheet.Scale, sheet.Scale / _stretch, sheet.Scale);
         }
 
         // ---- vanilla plumbing --------------------------------------------------------------------------

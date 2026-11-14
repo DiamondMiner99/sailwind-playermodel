@@ -15,3 +15,6 @@ unity/obj/
 unity/*.csproj
 unity/*.sln
 unity/build.log
+
+# Unity batch build log written at the repo root
+build.log

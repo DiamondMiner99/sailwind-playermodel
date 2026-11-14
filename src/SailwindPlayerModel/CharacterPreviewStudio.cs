@@ -45,6 +45,13 @@ namespace SailwindPlayerModel
         private static bool _framedOnce;
         private static float _requestedHeight;
         private static bool _resizeFailed, _resizeLogged;
+        private static Idle _idle;
+
+        /// <summary>
+        /// Degrees per second to keep turning the model, for a held Turn button. The screen sets it every repaint and
+        /// puts it back to 0 on release; the studio applies it each frame in unscaled time, since the game is paused.
+        /// </summary>
+        public static float SpinDegPerSec;
 
         /// <summary>The latest frame, or null when the studio is not up. Safe to read every OnGUI.</summary>
         public static RenderTexture Texture { get { return _rt; } }
@@ -150,6 +157,7 @@ namespace SailwindPlayerModel
                 foreach (var smr in _mannequin.GetComponentsInChildren<SkinnedMeshRenderer>(true))
                 { smr.enabled = true; smr.allowOcclusionWhenDynamic = false; }
                 SetLayerRecursive(_mannequin.transform, StudioLayer);
+                _idle = new Idle(_mannequin.transform);
 
                 // The lights. Directional, so their position is irrelevant; the culling mask keeps them off
                 // every other object in the world - this rig must not brighten the player's actual game.
@@ -177,6 +185,7 @@ namespace SailwindPlayerModel
                 _camera.targetTexture = _rt;
 
                 _yaw = 0f;
+                SpinDegPerSec = 0f;
                 _framedOnce = false;
                 _settleFrames = 12;   // Start() builds the mesh next frame; keep re-framing until it exists
                 FrameSubject();
@@ -201,7 +210,8 @@ namespace SailwindPlayerModel
                 if (_root != null) Object.Destroy(_root);
             }
             catch (System.Exception e) { Plugin.Log.LogWarning("[Character] Studio teardown: " + e.Message); }
-            _root = null; _mannequin = null; _camera = null;
+            _root = null; _mannequin = null; _camera = null; _idle = null;
+            SpinDegPerSec = 0f;
         }
 
         /// <summary>Re-dress the mannequin in place after an edit.</summary>
@@ -216,6 +226,14 @@ namespace SailwindPlayerModel
                 _settleFrames = 8;                                    // re-frame: the silhouette may have changed
             }
             catch (System.Exception e) { Plugin.Log.LogWarning("[Character] Studio restyle: " + e.Message); }
+        }
+
+        /// <summary>Recolor the mannequin without rebuilding it, for a color being dragged. The parts worn must be unchanged.</summary>
+        public static void SetColors(PlayerAppearance appearance)
+        {
+            if (_mannequin == null) return;
+            var c = _mannequin.GetComponentInChildren<PsychoticLab.CharacterCustomizer>(true);
+            if (c != null) appearance.ApplyColorsLive(c);
         }
 
         /// <summary>Spin the model, so the player can see the back of a hat.</summary>
@@ -263,7 +281,7 @@ namespace SailwindPlayerModel
                 float fovH = 2f * Mathf.Atan(Mathf.Tan(fovV * 0.5f) * aspect);
                 float distV = (height * 0.5f) / Mathf.Tan(fovV * 0.5f);
                 float distH = (width * 0.5f) / Mathf.Tan(fovH * 0.5f);
-                float dist = Mathf.Max(distV, distH) * 1.35f;
+                float dist = Mathf.Max(distV, distH) * 1.1f;   // a little room round the idle's sway
 
                 Vector3 center = bounds.center;
                 Vector3 pos = center + new Vector3(0f, height * 0.04f, dist);
@@ -303,6 +321,66 @@ namespace SailwindPlayerModel
         }
 
         /// <summary>
+        /// A standing idle for the mannequin, so the preview reads as a person and patterns can be seen staying on the
+        /// clothes as the body moves: breathing, a slow shift of weight from foot to foot with the spine leaning back
+        /// against it, the head looking slowly around, and the arms drifting with the breath.
+        ///
+        /// The game has no animation clips for its people (the NPC Animator carries no controller), and the player's
+        /// body is posed by SyntyBody's bone writing, so this writes bones too. Every turn is about the mannequin's own
+        /// up, right or forward axis rather than a bone's local axis, so no bone's axis convention has to be known. Each
+        /// frame starts from the rest pose, parents before children. Preview only; nothing here touches a real body.
+        /// </summary>
+        private sealed class Idle
+        {
+            private const int Hips = 0, Spine1 = 1, Spine2 = 2, Spine3 = 3, Neck = 4, Head = 5, ArmL = 6, ArmR = 7;
+            private static readonly string[] Names = { "Hips", "Spine_01", "Spine_02", "Spine_03", "Neck", "Head", "Shoulder_L", "Shoulder_R" };
+            private readonly Transform _root;
+            private readonly Transform[] _bones = new Transform[Names.Length];
+            private readonly Quaternion[] _rest = new Quaternion[Names.Length];
+
+            public Idle(Transform root)
+            {
+                _root = root;
+                for (int i = 0; i < Names.Length; i++)
+                {
+                    _bones[i] = BodyTemplate.FindDeep(root, Names[i]);
+                    if (_bones[i] != null) _rest[i] = _bones[i].localRotation;
+                }
+            }
+
+            public void Apply(float t)
+            {
+                if (_root == null) return;
+                for (int i = 0; i < _bones.Length; i++)
+                    if (_bones[i] != null) _bones[i].localRotation = _rest[i];
+
+                const float Tau = 2f * Mathf.PI;
+                float breathe = Mathf.Sin(t * Tau * 0.23f);
+                float sway = Mathf.Sin(t * Tau * 0.07f);
+                float look = 9f * Mathf.Sin(t * Tau * 0.045f) + 4f * Mathf.Sin(t * Tau * 0.11f + 1.3f);
+                float nod = 2.5f * Mathf.Sin(t * Tau * 0.06f + 0.7f);
+                Vector3 up = _root.up, right = _root.right, fwd = _root.forward;
+
+                Turn(Hips, fwd, 1.2f * sway);
+                Turn(Spine1, fwd, -0.8f * sway);
+                Turn(Spine2, fwd, -0.6f * sway);
+                Turn(Spine2, right, 0.9f * breathe);
+                Turn(Spine3, right, 0.7f * breathe);
+                Turn(Neck, up, 0.4f * look);
+                Turn(Head, up, 0.6f * look);
+                Turn(Head, right, nod);
+                Turn(ArmL, right, 1.5f * breathe + 1.2f * sway);
+                Turn(ArmR, right, 1.5f * breathe - 1.2f * sway);
+            }
+
+            private void Turn(int i, Vector3 worldAxis, float degrees)
+            {
+                var b = _bones[i];
+                if (b != null) b.rotation = Quaternion.AngleAxis(degrees, worldAxis) * b.rotation;
+            }
+        }
+
+        /// <summary>
         /// Renders the studio once per frame and, crucially, deletes the whole rig the moment the screen is
         /// no longer open - whichever of the several close paths got taken, including the emergency one.
         /// </summary>
@@ -311,6 +389,11 @@ namespace SailwindPlayerModel
             private void LateUpdate()
             {
                 if (!CharacterScreen.IsOpen) { CharacterPreviewStudio.Close(); return; }
+
+                // Turn and pose first, then frame, so the framing and the render see the same body this frame. Unscaled
+                // time, since the game is paused behind this screen outside co-op.
+                if (SpinDegPerSec != 0f) Turn(SpinDegPerSec * Time.unscaledDeltaTime);
+                if (_idle != null) _idle.Apply(Time.unscaledTime);
 
                 // Keep re-framing for the first stretch after anything changes. Vanilla builds the mesh in
                 // Start(), a frame after the clone is made, and a restyle can change the silhouette (a tall

@@ -50,17 +50,23 @@ other mods can add buttons to.
   tabletop. You stay seated while you use the chart table or a market, and while you pass out or sleep in a
   tavern room. Don't sit on a lit stove for too long.
 - The model lies down in the game's beds.
-- Character screen: head, hair, eyebrows, facial hair, hat, hood, face cover, torso, gloves, hips, legs, back,
-  shoulders, elbows, knees, belt, and colors for skin, hair, cloth, trim, leather and metal. A hood hides your
-  hair and hat, and a face cover hides your beard. Gloves set to Match torso come with the torso you pick. Uses
-  the game's NPC parts. Opened from the pause menu. It is drawn larger on screens taller than 1080 pixels, and the
-  UIScale setting makes it larger or smaller. In a window too small for it, it shrinks to fit.
+- Character screen, opened from the pause menu. The Parts tab picks the head, hair, eyebrows, facial hair, stubble,
+  hat, hood, face cover, torso, gloves, hips, legs, back, shoulders, elbows, knees and belt. A hood hides your hair
+  and hat, and a face cover hides your beard. Gloves set to Match torso come with the torso you pick. The Colors tab
+  sets skin, hair, cloth, trim, leather and metal from a palette, or to any color with the hue, saturation and
+  brightness sliders, for the whole body or for one part. Cloth and trim can carry a pattern with a scale: stripes,
+  pinstripes, checks, plaid, fade, Breton, diagonal, chevron, diamonds, argyle, gingham, windowpane, waves, dots,
+  halves or quartered. Pointing at a pattern in the list shows it on your character before you pick it. Randomize
+  rolls a new look, and the arrows beside it step back and forward through the last 30 rolls. Drag the preview, or
+  hold the arrows under it, to turn it. Uses the game's NPC parts. It is drawn larger on screens taller than 1080
+  pixels, and the UIScale setting makes it larger or smaller. In a window too small for it, it shrinks to fit.
 - Outfits: the Character screen lists your saved looks beside the preview, as many as you like. Click one to put
   it on, and Current look to go back to what you had on. Save new, Update, Rename and Delete manage the list.
   They are kept in `BepInEx/config/com.diamondminer99.playermodel.outfits.txt`, one per line, so a crew can share
   a uniform by copying a line.
-- Pause menu: Esc opens a menu with Resume, Character, Settings, Recover Boat and Quit Game. Settings
-  opens the normal settings screen and Recover Boat opens the game's boat recovery screen.
+- Pause menu: Esc opens a menu with Resume, Character, Settings, Recover Boat and Quit Game, on a sheet of the
+  game's paper in the middle of the screen. PauseMenuStyle switches it to a parchment scroll. Settings opens the
+  normal settings screen and Recover Boat opens the game's boat recovery screen.
 - The model is cloned from the game's NPCs at runtime, so there are no asset files.
 
 ## Installation
@@ -121,9 +127,10 @@ Options are in `BepInEx/config/com.diamondminer99.playermodel.cfg` or the F1 men
   button (FollowButton), whether the camera key goes through it (CameraKeyFollows), and the look lock (LookLockKey,
   unbound by default, with LookLockButton for a gamepad and LookFollowsCamera for the state the view opens in), scroll wheel zoom
   (ScrollZoom) and the zoom keys (ZoomInKey, ZoomOutKey, unbound by default)
-- **Appearance**: your character, as `slot=variant` pairs. The Character screen writes this
-- **Menu**: pause menu button size, and the size of the Character screen, the seat hints and the (seated) label
-  (UIScale)
+- **Appearance**: your character, as `key=value` pairs for its parts, colors and patterns. The Character screen
+  writes this
+- **Menu**: the pause menu's style (PauseMenuStyle, Paper or Scroll), its button size, and the size of the Character
+  screen, the seat hints and the (seated) label (UIScale)
 
 ## For mod developers
 
@@ -170,7 +177,8 @@ is built is added to it right away. Registering the same `Id` again replaces the
 `Label` and `Visible` are called every frame while the menu is open. Hidden buttons are removed from the
 column and the rest are re-spaced. Built-in button orders: Resume 0, Character 300, Settings 400, Recover 500,
 Quit 900. `ModPauseMenu.SetVisible(id, func)` changes when a button is shown, built-ins included.
-`ModPauseMenu.CloneScroll` creates an extra parchment panel next to the menu.
+`ModPauseMenu.CloneScroll` creates an extra panel next to the menu: a paper tag beside the Paper style, or a
+parchment panel beside the Scroll style.
 
 Sailwind Co-op adds its buttons and crew list this way.
 

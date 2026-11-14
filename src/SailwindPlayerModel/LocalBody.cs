@@ -112,8 +112,11 @@ namespace SailwindPlayerModel
 
                 if (_body == null)
                 {
-                    if (Time.time < _nextRetry) return;
-                    _nextRetry = Time.time + 1.5f;
+                    // A quarter second, on real time: after a load the body shows a few frames after the NPC it is
+                    // cloned from does, and a paused game does not hold the retry up. A failed try searches the loaded
+                    // NPCs, which is why it is not every frame; once the body exists this is not reached.
+                    if (Time.unscaledTime < _nextRetry) return;
+                    _nextRetry = Time.unscaledTime + 0.25f;
                     TryBuild();
                     if (_body == null) return;
                 }

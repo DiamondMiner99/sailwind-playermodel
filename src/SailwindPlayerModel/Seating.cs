@@ -324,8 +324,75 @@ namespace SailwindPlayerModel
             along.Normalize();
             Vector3 eyePos = Refs.observerMirror != null ? EyeWorld(Refs.observerMirror.transform) : sleepPos.position;
             // The head bone sits a little below and behind the eyes of a face turned to the sky.
-            head = eyePos - up * 0.08f - along * 0.03f;
+            head = eyePos - up * HeadBelowSleepPos - along * 0.03f;
+            // The game's bed view sits low over the mattress, so a body laid at the head's height sank into it
+            // with only the face showing. Lift it until the back rests on the bed's own top.
+            head += up * BedLift(bed, head, along, up);
             return true;
+        }
+
+        // How far the head bone is from resting on the bed's top. The back of a body lying face up is about 0.11 m below
+        // its head bone.
+        //
+        // The top is found by casting down onto the WORLD, not onto the bed's own colliders: vanilla EnterBed switches the
+        // bed object's collider off for as long as someone lies in it, and a built-in bunk has no other (it must have
+        // exactly one child, the sleep position, per GPButtonBed), so its mattress is part of the boat. Raycast is the
+        // seat probe, which also looks at a boat's walking copy and leaves out the player's own frozen controller and
+        // view. A bed item (ShipItemBed, the Kemy beds) is found the same way through its other colliders.
+        //
+        // Measured once per bed and kept relative to the bed's sleep position, which the game pins the view to: the bed
+        // does not change shape while someone lies in it, and the head moves a little with the view, so the lift is
+        // worked out from the current head each call. The casts start from where the head WILL be, worked out from the
+        // sleep position, not from the view: on the frame the bed is clicked the game has not moved the view into it
+        // yet, and a measurement taken from beside the bed would be kept for every later rest in it.
+        //
+        // A top the body could only reach by lifting more than MaxBedLift is not the mattress (a bed item's click box over
+        // its headboard, a shelf), so it is passed over and the cast goes on down, where before it was taken and the body
+        // floated at the full lift. So is another item's click box: a bottle or a crate lying on the bunk is not the bed.
+        // A placed bed item's own trigger stays, since it is how its mattress is found at all.
+        private const float BackBelowHead = 0.11f;
+        private const float HeadBelowSleepPos = 0.08f;
+        private const float MaxBedLift = 0.35f;
+        private static Transform _liftBed;
+        private static bool _liftFound;
+        private static float _topAboveSleepPos;
+
+        private static float BedLift(Transform bed, Vector3 head, Vector3 along, Vector3 up)
+        {
+            Transform sleepPos = bed.childCount > 0 ? bed.GetChild(0) : bed;
+            if (bed != _liftBed)
+            {
+                _liftBed = bed;
+                _liftFound = false;
+                var tops = new List<float>();
+                Vector3 restHead = sleepPos.position - up * HeadBelowSleepPos - along * 0.03f;   // as TryGetLying places it
+                float highestTop = MaxBedLift - BackBelowHead - HeadBelowSleepPos;   // above the sleep position
+                var bedItem = bed.GetComponentInParent<ShipItem>();
+                System.Func<Collider, Vector3, bool> notMattress = (c, point) =>
+                    Vector3.Dot(point - sleepPos.position, up) > highestTop + 0.01f
+                    || (c.isTrigger && (bedItem == null || c.GetComponentInParent<ShipItem>() != bedItem));
+                // Under the shoulders, the hips and the knees, which keeps the head and foot boards out of it. From 0.3 m
+                // above the head, below any canopy or upper bunk, which a cast from higher up would take for the bed.
+                foreach (float d in new[] { 0.35f, 0.8f, 1.2f })
+                {
+                    Hit hit;
+                    if (Raycast(restHead + along * d + up * 0.3f, -up, 0.9f, null, out hit, notMattress))
+                        tops.Add(Vector3.Dot(hit.Point - sleepPos.position, up));
+                }
+                if (tops.Count > 0)
+                {
+                    tops.Sort();
+                    _topAboveSleepPos = tops[tops.Count / 2];
+                    _liftFound = true;
+                }
+                Plugin.Log.LogInfo($"[Seating] bed '{bed.name}': " + (_liftFound
+                    ? $"top {_topAboveSleepPos:F2} m from the sleep position ({tops.Count} of 3 casts hit), lift " +
+                      $"{Mathf.Clamp(Vector3.Dot(sleepPos.position + up * _topAboveSleepPos - head, up) + BackBelowHead, 0f, MaxBedLift):F2} m"
+                    : "no surface under the body, not lifted"));
+            }
+            if (!_liftFound) return 0f;
+            float top = Vector3.Dot(sleepPos.position + up * _topAboveSleepPos - head, up);
+            return Mathf.Clamp(top + BackBelowHead, 0f, MaxBedLift);
         }
 
         // ---- per frame ---------------------------------------------------------------------------------
@@ -1762,20 +1829,22 @@ namespace SailwindPlayerModel
         /// Nearest hit that is not the player, a held item or a trigger, in the visible frame and, aboard a boat,
         /// on its walking copy. A walking copy hit is reported where it sits on the visible boat.
         /// </summary>
-        private static bool Raycast(Vector3 origin, Vector3 dir, float distance, Transform ignore, out Hit best)
+        /// <param name="reject">Optional: hits to pass over, given the collider and the hit point in the visible frame.</param>
+        private static bool Raycast(Vector3 origin, Vector3 dir, float distance, Transform ignore, out Hit best,
+            System.Func<Collider, Vector3, bool> reject = null)
         {
             best = default(Hit);
             float bestD = float.MaxValue;
-            CastOne(origin, dir, distance, ignore, false, null, null, ref best, ref bestD);
+            CastOne(origin, dir, distance, ignore, false, null, null, ref best, ref bestD, 0f, reject);
             Transform v, w;
             // The visible frame wins a tie: its hull copy and the walking hull are the same mesh.
             if (WalkFrames(out v, out w))
-                CastOne(ToWalk(origin, v, w), ToWalkDir(dir, v, w), distance, ignore, true, v, w, ref best, ref bestD, 0.02f);
+                CastOne(ToWalk(origin, v, w), ToWalkDir(dir, v, w), distance, ignore, true, v, w, ref best, ref bestD, 0.02f, reject);
             return bestD < float.MaxValue;
         }
 
         private static void CastOne(Vector3 origin, Vector3 dir, float distance, Transform ignore, bool walk, Transform v, Transform w,
-            ref Hit best, ref float bestD, float mustBeCloserBy = 0f)
+            ref Hit best, ref float bestD, float mustBeCloserBy = 0f, System.Func<Collider, Vector3, bool> reject = null)
         {
             int n = Physics.RaycastNonAlloc(origin, dir, _hits, distance, SeatLayers, QueryTriggerInteraction.Collide);
             for (int i = 0; i < n; i++)
@@ -1784,10 +1853,12 @@ namespace SailwindPlayerModel
                 if (c == null || Skip(c, walk)) continue;
                 if (ignore != null && c.transform.IsChildOf(ignore)) continue;
                 if (_hits[i].distance >= bestD - mustBeCloserBy) continue;
+                Vector3 point = walk ? v.TransformPoint(w.InverseTransformPoint(_hits[i].point)) : _hits[i].point;
+                if (reject != null && reject(c, point)) continue;
                 bestD = _hits[i].distance;
                 best = new Hit
                 {
-                    Point = walk ? v.TransformPoint(w.InverseTransformPoint(_hits[i].point)) : _hits[i].point,
+                    Point = point,
                     Normal = walk ? v.TransformDirection(w.InverseTransformDirection(_hits[i].normal)) : _hits[i].normal,
                     Distance = _hits[i].distance,
                     Collider = c,

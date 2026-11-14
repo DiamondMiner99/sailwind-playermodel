@@ -54,26 +54,46 @@ namespace SailwindPlayerModel
             if (src == null) { kind = "Shopkeeper"; src = PickSource<Shopkeeper>(); }
             if (src == null) return false;
 
-            var template = UnityEngine.Object.Instantiate(src);
-            RestoreRestPose(src, template);
-            // PortDude.Awake calls port.RegisterDude(this), and Instantiate runs Awake at once on an active
-            // source. The character object normally carries no PortDude (it sits on the parent), but if a
-            // layout ever puts them together, hand the job back to the real one before the clone is stripped.
-            foreach (var dude in src.GetComponentsInChildren<PortDude>(true))
+            bool srcActive = src.activeInHierarchy;
+            GameObject template;
+            if (srcActive)
             {
-                var port = dude.GetPort();
-                if (port != null) port.RegisterDude(dude);
+                template = UnityEngine.Object.Instantiate(src);
+                RestoreRestPose(src, template);
+                // PortDude.Awake calls port.RegisterDude(this), and Instantiate runs Awake at once on an active
+                // source. The character object normally carries no PortDude (it sits on the parent), but if a
+                // layout ever puts them together, hand the job back to the real one before the clone is stripped.
+                foreach (var dude in src.GetComponentsInChildren<PortDude>(true))
+                {
+                    var port = dude.GetPort();
+                    if (port != null) port.RegisterDude(dude);
+                }
+                template.name = "PlayerModelBodyTemplate";
+                // Match the size the NPC had IN-SCENE. Instantiate copies src's LOCAL scale, but the character sits
+                // under scaled parents, so its real on-screen size is the WORLD (lossy) scale. A parentless clone
+                // with only the local scale renders about twice too small or too big; pin it to the world scale.
+                template.transform.localScale = src.transform.lossyScale;
+                // The part lists are what the appearance code counts against. They are built by vanilla's Start
+                // and copied by Instantiate, so they are normally populated already; rebuilding them here makes
+                // that true regardless of what state the source was in. Must run while the clone is still ACTIVE:
+                // vanilla's BuildLists only sees active objects.
+                RebuildPartLists(template);
             }
-            template.name = "PlayerModelBodyTemplate";
-            // Match the size the NPC had IN-SCENE. Instantiate copies src's LOCAL scale, but the character sits
-            // under scaled parents, so its real on-screen size is the WORLD (lossy) scale. A parentless clone
-            // with only the local scale renders about twice too small or too big; pin it to the world scale.
-            template.transform.localScale = src.transform.lossyScale;
-            // The part lists are what the appearance code counts against. They are built by vanilla's Start
-            // and copied by Instantiate, so they are normally populated already; rebuilding them here makes
-            // that true regardless of what state the source was in. Must run while the clone is still ACTIVE:
-            // vanilla's BuildLists only sees active objects.
-            RebuildPartLists(template);
+            else
+            {
+                // A switched-off NPC whose part holders are switched off too gives BuildLists nothing, and a template
+                // kept like that would dress the player from empty lists all session. Drop it and say no, so the
+                // next try takes another NPC, or an active one once the world streams in, as before this fallback.
+                template = CloneInactive(src);
+                if (!HasParts(template))
+                {
+                    if (template != null) UnityEngine.Object.Destroy(template);
+                    _unusable.Add(src.GetInstanceID());
+                    Plugin.Log.LogWarning($"[PlayerModel] Switched-off {kind} '{src.name}' gave no usable part lists; " +
+                                          "not using it as the body template.");
+                    return false;
+                }
+            }
             // The customizer's material is the SOURCE NPC's own instance, shared by reference with him. Take
             // our own copy so nothing this mod writes can touch a live NPC.
             var cust = template.GetComponentInChildren<CharacterCustomizer>(true);
@@ -91,16 +111,70 @@ namespace SailwindPlayerModel
 
             string parent = src.transform.parent != null ? src.transform.parent.name : "(none)";
             Plugin.Log.LogInfo($"[PlayerModel] Captured a humanoid body template from {kind} '{src.name}' under '{parent}' " +
-                               $"(scene '{src.scene.name}', world scale {src.transform.lossyScale.x:F2}). {DescribeParts(template)}");
+                               $"(scene '{src.scene.name}', world scale {src.transform.lossyScale.x:F2}" +
+                               (srcActive ? "" : ", switched off in the scene") + $"). {DescribeParts(template)}");
             return true;
+        }
+
+        /// <summary>
+        /// Clone an NPC that is switched off in the scene. It may never have run its Start, so its part lists can be
+        /// empty, and vanilla's BuildLists cannot fill them on an inactive object: it searches with
+        /// GetComponentsInChildren without includeInactive, finds nothing, clears the first list and throws.
+        ///
+        /// So the clone is made under an inactive holder, where no Awake runs (a PortDude.Awake would register the
+        /// clone with the real port), and stripped there. Then it is taken out and switched on just long enough for
+        /// BuildLists. Only the CharacterCustomizer survives the strip, it has no Awake or OnEnable, and its Start is
+        /// never reached because Ensure switches the template off again in the same frame.
+        /// </summary>
+        // Switched-off NPCs whose clone came out without part lists, by instance id, so they are not cloned again on
+        // every retry.
+        private static readonly HashSet<int> _unusable = new HashSet<int>();
+
+        /// <summary>Whether a template can dress both genders: a torso and a head in each part list.</summary>
+        private static bool HasParts(GameObject root)
+        {
+            if (root == null) return false;
+            var c = root.GetComponentInChildren<CharacterCustomizer>(true);
+            if (c == null) return false;
+            Func<List<GameObject>, bool> any = l => l != null && l.Exists(g => g != null);
+            return c.male != null && any(c.male.torso) && any(c.male.headAllElements)
+                && c.female != null && any(c.female.torso) && any(c.female.headAllElements);
+        }
+
+        private static GameObject CloneInactive(GameObject src)
+        {
+            var holder = new GameObject("PlayerModelTemplateHolder");
+            holder.SetActive(false);
+            try
+            {
+                var template = UnityEngine.Object.Instantiate(src, holder.transform, false);
+                // A never-started NPC has no rest rotations to restore; RestoreRestPose leaves the pose as authored then.
+                RestoreRestPose(src, template);
+                template.name = "PlayerModelBodyTemplate";
+                Strip(template);
+                template.transform.SetParent(null, false);
+                template.transform.SetPositionAndRotation(src.transform.position, src.transform.rotation);
+                template.transform.localScale = src.transform.lossyScale; // see the active path in Ensure
+                template.SetActive(true);
+                RebuildPartLists(template);
+                return template;
+            }
+            finally
+            {
+                UnityEngine.Object.Destroy(holder);
+            }
         }
 
         /// <summary>
         /// The character root of the best usable NPC of this kind, or null. The root is the object that OWNS
         /// the CharacterCustomizer: found by walking up from the NPC script's object, then by searching down
-        /// into its children, which is where both the harbormaster and the shopkeepers keep it. Only NPCs
-        /// that are active in the hierarchy qualify: an inactive one never ran its Start, so its part lists
-        /// are empty and it cannot be dressed.
+        /// into its children, which is where both the harbormaster and the shopkeepers keep it.
+        ///
+        /// ACTIVE NPCs FIRST, THEN SWITCHED-OFF ONES. In vanilla the harbormasters are active from the moment the
+        /// world loads, so the active pass always finds one and picks exactly what earlier versions picked. A mod
+        /// that changes the load order can leave every NPC switched off for a player who loads at sea (Keevi
+        /// Fixes unloads the start scene earlier, reported 2026-11-09). The second pass takes those too, and
+        /// CloneInactive rebuilds the part lists an inactive NPC may never have filled.
         ///
         /// THE STANCE COMES WITH THE CLONE. Each NPC's arms are posed in the scene, and the body keeps the cloned
         /// arms as its rest pose. Most harbormasters stand arms down, but a few are posed differently: the
@@ -114,6 +188,11 @@ namespace SailwindPlayerModel
         /// </summary>
         private static GameObject PickSource<T>() where T : Component
         {
+            return PickSource<T>(true) ?? PickSource<T>(false);
+        }
+
+        private static GameObject PickSource<T>(bool activeOnly) where T : Component
+        {
             var roots = new List<GameObject>();
             var keys = new List<string>();
             var scores = new List<int>();
@@ -124,10 +203,11 @@ namespace SailwindPlayerModel
                 var go = c.gameObject;
                 if (!go.scene.IsValid()) continue;      // skip prefab assets
                 if (go.hideFlags != HideFlags.None) continue;
-                if (!go.activeInHierarchy) continue;
+                if (activeOnly && !go.activeInHierarchy) continue;
 
                 var root = FindCharacterRoot(go);
                 if (root == null) continue;
+                if (!activeOnly && _unusable.Contains(root.GetInstanceID())) continue;
 
                 int score = 0;
                 if (go.name.IndexOf("test", StringComparison.OrdinalIgnoreCase) >= 0) score -= 10;

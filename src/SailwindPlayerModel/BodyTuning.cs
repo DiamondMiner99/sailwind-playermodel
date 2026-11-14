@@ -28,6 +28,7 @@ namespace SailwindPlayerModel
         public static ConfigEntry<float> LookPitchMaxDeg { get; private set; }
         public static ConfigEntry<string> Appearance { get; private set; }
         public static ConfigEntry<float> MenuButtonScale { get; private set; }
+        public static ConfigEntry<ModPauseMenu.MenuStyle> PauseMenuStyle { get; private set; }
         public static ConfigEntry<float> UIScale { get; private set; }
         public static ConfigEntry<bool> SwimAnimation { get; private set; }
 
@@ -87,6 +88,8 @@ namespace SailwindPlayerModel
             MenuButtonScale = cfg.Bind(SecMenu, "MenuButtonScale", 1f,
                 new ConfigDescription("Size of the buttons on the in-game pause menu, relative to vanilla. Default 1.0 is vanilla-sized. The parchment stays the same size, so lowering it leaves more space between the buttons. Applies immediately, including while the menu is open.",
                     new AcceptableValueRange<float>(0.5f, 1f)));
+            PauseMenuStyle = cfg.Bind(SecMenu, "PauseMenuStyle", ModPauseMenu.MenuStyle.Paper,
+                "How the in-game pause menu is drawn. Paper: the buttons on a hanging sheet like the Sailwind banner. Scroll: the parchment scroll from the title menu. Applies immediately.");
             // The pause menu above is world-space and already grows with the screen like the game's own menus.
             // This one is for the screen-space panels, which are drawn in pixels. Read through
             // SailwindSkin.UiScale, which adds the automatic part.

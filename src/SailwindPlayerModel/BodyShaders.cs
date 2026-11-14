@@ -11,7 +11,7 @@ namespace SailwindPlayerModel
     {
         private const string ResourceName = "SailwindPlayerModel.playermodel.shaders";
         private static bool _tried;
-        private static Shader _seatedFade;
+        private static Shader _seatedFade, _patterned;
 
         /// <summary>SailwindPlayerModel/SeatedBodyFade, or null when it could not be loaded.</summary>
         public static Shader SeatedFade
@@ -20,6 +20,19 @@ namespace SailwindPlayerModel
             {
                 if (!_tried) Load();
                 return _seatedFade;
+            }
+        }
+
+        /// <summary>
+        /// SailwindPlayerModel/PatternedBody, or null when it could not be loaded. Without it a look's patterns are not
+        /// drawn and its colors still are.
+        /// </summary>
+        public static Shader Patterned
+        {
+            get
+            {
+                if (!_tried) Load();
+                return _patterned;
             }
         }
 
@@ -46,17 +59,22 @@ namespace SailwindPlayerModel
                 foreach (var shader in bundle.LoadAllAssets<Shader>())
                 {
                     if (shader.name == "SailwindPlayerModel/SeatedBodyFade") _seatedFade = shader;
+                    else if (shader.name == "SailwindPlayerModel/PatternedBody") _patterned = shader;
                 }
                 // The shaders stay loaded; the bundle's own bookkeeping can go.
                 bundle.Unload(false);
                 if (_seatedFade == null) Plugin.Log.LogWarning("[Shaders] SeatedBodyFade is not in the bundle");
                 else if (!_seatedFade.isSupported) { Plugin.Log.LogWarning("[Shaders] SeatedBodyFade is not supported on this graphics card"); _seatedFade = null; }
                 else Plugin.Log.LogInfo("[Shaders] loaded SeatedBodyFade");
+                if (_patterned == null) Plugin.Log.LogWarning("[Shaders] PatternedBody is not in the bundle; patterns will not show");
+                else if (!_patterned.isSupported) { Plugin.Log.LogWarning("[Shaders] PatternedBody is not supported on this graphics card; patterns will not show"); _patterned = null; }
+                else Plugin.Log.LogInfo("[Shaders] loaded PatternedBody");
             }
             catch (System.Exception e)
             {
                 Plugin.Log.LogWarning("[Shaders] " + e.Message);
                 _seatedFade = null;
+                _patterned = null;
             }
         }
     }
