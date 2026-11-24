@@ -1,0 +1,9 @@
+{
+  "name": "SailwindPlayerModel",
+  "version_number": "0.2.1",
+  "website_url": "https://github.com/DiamondMiner99/sailwind-playermodel",
+  "description": "A third-person player model for Sailwind, a character customization screen, and a pause menu that other mods can add buttons to.",
+  "dependencies": [
+    "BepInEx-BepInExPack-5.4.2305"
+  ]
+}

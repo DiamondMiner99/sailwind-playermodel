@@ -20,6 +20,9 @@ namespace SailwindPlayerModel
         Crank,
         /// <summary>A sail pusher: both hands pressed against it.</summary>
         Push,
+        /// <summary>A winch's rope hauled by hand (the Hand Over Hand mod): both hands on the rope between where it leaves
+        /// the deck and the hand, hand over hand as it comes in. The target is the winch.</summary>
+        Haul,
     }
 
     /// <summary>Live tuning for the control poses. Every value applies immediately from the F1 menu.</summary>

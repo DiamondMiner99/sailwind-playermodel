@@ -618,7 +618,8 @@ namespace SailwindPlayerModel
             // Something else handing the controls back is not a reason: the patch keeps those hand-backs while seated.
             Transform control;
             var kind = PlayerModel.GetLocalControl(out control);
-            if (kind != InteractionKind.None && control != _seatedControl
+            // A rope hauled by hand (Hand Over Hand) comes to the hands wherever they are, so it is worked from the seat too.
+            if (kind != InteractionKind.None && control != _seatedControl && kind != InteractionKind.Haul
                 && !(kind == InteractionKind.Helm && RotorSpecs.IsTiller(control))) return TookControl;
             return null;
         }

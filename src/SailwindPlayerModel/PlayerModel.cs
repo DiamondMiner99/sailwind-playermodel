@@ -84,9 +84,17 @@ namespace SailwindPlayerModel
         }
 
         /// <summary>
+        /// True while the third person view that follows the player is up. It runs on the game's ship camera, so other
+        /// mods that stop at BoatCamera.on can tell it apart from the game's own ship view. Hand Over Hand reads it to keep
+        /// a rope held there.
+        /// </summary>
+        public static bool FollowCameraActive { get { return PlayerOrbitCamera.Following; } }
+
+        /// <summary>
         /// The control the local player is operating right now: the ship's wheel (<see cref="InteractionKind.Helm"/>),
-        /// a rope winch or bilge pump (<see cref="InteractionKind.Crank"/>), or a sail pusher
-        /// (<see cref="InteractionKind.Push"/>). None otherwise, with <paramref name="control"/> null. Read from
+        /// a rope winch or bilge pump (<see cref="InteractionKind.Crank"/>), a sail pusher
+        /// (<see cref="InteractionKind.Push"/>), or a winch whose rope is held with the Hand Over Hand mod
+        /// (<see cref="InteractionKind.Haul"/>, control = the winch). None otherwise, with <paramref name="control"/> null. Read from
         /// the game's own pointer, so it works in first person as well as in the orbit camera.
         ///
         /// Co-op sends this to the crew. Carried items and mooring ropes are not reported here because they
@@ -99,7 +107,7 @@ namespace SailwindPlayerModel
             Transform target;
             PickupableItem held;
             var kind = LocalInteraction.Sample(out target, out held);
-            if (kind != InteractionKind.Helm && kind != InteractionKind.Crank && kind != InteractionKind.Push)
+            if (kind != InteractionKind.Helm && kind != InteractionKind.Crank && kind != InteractionKind.Push && kind != InteractionKind.Haul)
                 return InteractionKind.None;
             control = target;
             return kind;

@@ -45,6 +45,8 @@ Shader "SailwindPlayerModel/SeatedBodyFade"
         _PatB ("Trim pattern (type, size)", Vector) = (0, 0.5, 0, 0)
         _PatBColor ("Trim pattern color", Color) = (1, 1, 1, 1)
         _PatRange ("Part rest height range (w: placed)", Vector) = (0, 1, 0, 0)
+        _PatATex ("Cloth picture", 2D) = "white" {}
+        _PatBTex ("Trim picture", 2D) = "white" {}
     }
 
     CGINCLUDE

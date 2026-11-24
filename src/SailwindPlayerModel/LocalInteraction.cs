@@ -90,9 +90,18 @@ namespace SailwindPlayerModel
 
             held = p.GetHeldItem();
 
+            // GoPointer keeps its clickedButton after a winch is let go in the ship camera, where it skips the release;
+            // the winch itself knows it is no longer clicked.
+            if (op is GPButtonRopeWinch opWinch && !opWinch.IsCliked() && !opWinch.IsStickyClicked()) op = null;
+
             if (op != null && op.isActiveAndEnabled)
             {
                 if (op is GPButtonSteeringWheel) { target = op.transform; return InteractionKind.Helm; }
+                if (op is GPButtonRopeWinch && HandOverHandBridge.TryGetHold(out var hauled, out _, out _, out _, out _) && ReferenceEquals(hauled, op))
+                {
+                    target = op.transform;
+                    return InteractionKind.Haul;
+                }
                 if (op is GPButtonRopeWinch || op is BilgePump) { target = op.transform; return InteractionKind.Crank; }
                 if (op is GPButtonSailPusher) { target = op.transform; return InteractionKind.Push; }
             }

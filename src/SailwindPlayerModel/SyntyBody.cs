@@ -154,6 +154,16 @@ namespace SailwindPlayerModel
         private Vector3 _shoulderMidRoot;    // root-local shoulder midpoint at the planted rest pose
         private float _shoulderHalf = 0.18f; // half the distance between the shoulder joints
         private readonly RotorGrip _rotor = new RotorGrip();
+        // A winch's rope hauled by hand (InteractionKind.Haul). For the local body Hand Over Hand hands in the hold each
+        // frame (SetHaulHold); a crewmate's is worked out from their winch and their look.
+        private readonly HaulGrip _haul = new HaulGrip();
+        private Vector3 _haulBelay, _haulHand;
+        private float _haulThrough;
+        private bool _haulRunning;
+        private int _haulFrame = -10;
+        // Leaning back against a hauled rope, in degrees, eased.
+        private float _haulLean;
+        private const float HaulLeanBase = 3f, HaulLeanLoad = 12f;
         private readonly TillerGrip _tiller = new TillerGrip();
         private float _tillerIntrusion = float.PositiveInfinity;   // how far a held tiller may reach into the body (see KeepClearOfTiller)
         private bool _tillerRightHand;                               // the hand that reach was measured for
@@ -562,6 +572,9 @@ namespace SailwindPlayerModel
             _tillerIntrusion = float.PositiveInfinity;
             _seatLeanDeg = 0f;
             _seatTurnDeg = 0f;
+            _haul.Destroy();
+            _haulLean = 0f;
+            _haulFrame = -10;
             _fitWaitFrames = 0;
             _itemPoseValid = false;
             _itemBlend = 0f;
@@ -607,6 +620,20 @@ namespace SailwindPlayerModel
             _ixKind = kind;
             _ixTarget = target;
             _ixFrame = Time.frameCount;
+        }
+
+        /// <summary>
+        /// The rope the local player holds with Hand Over Hand, this frame: where it leaves the deck, where it ends in the
+        /// hand, the meters through the hands so far, and whether it is running out under right click. Call every frame
+        /// along with SetInteraction(Haul, winch). Without it, as for a crewmate, the hand is put in front of the eyes.
+        /// </summary>
+        internal void SetHaulHold(Vector3 belay, Vector3 hand, float through, bool running)
+        {
+            _haulBelay = belay;
+            _haulHand = hand;
+            _haulThrough = through;
+            _haulRunning = running;
+            _haulFrame = Time.frameCount;
         }
 
         /// <summary>The interaction posed on the last tick. None when the hands are free.</summary>
@@ -1261,6 +1288,8 @@ namespace SailwindPlayerModel
             for (int i = 0; i < _floorW.Length; i++) floorLean += FloorLean[i] * _floorW[i];
             float down = Mathf.Max(Mathf.Max(_rag01, _getUp01), _swim01);
             float spinePitch = (CrouchTorsoLean * crouch + lookLean) * (1f - Mathf.Max(_lie01, down)) + (6f - 12f * _tuck + floorLean) * _seat01 * (1f - down);
+            // Leaning back against a rope hauled standing.
+            spinePitch -= _haulLean * (1f - Mathf.Max(_lie01, down)) * (1f - _seat01);
             if (spine && _bSpine != null && Mathf.Abs(spinePitch) > 0.001f)
                 _bSpine.Rotate(_instance.transform.right, spinePitch, Space.World);
 
@@ -2496,6 +2525,8 @@ namespace SailwindPlayerModel
 
             HandGrip gr = default(HandGrip), gl = default(HandGrip);
             bool carry = IsCarry(kind);
+            if (kind != InteractionKind.Haul) _haul.Release();
+            float haulLeanGoal = 0f;
 
             switch (kind)
             {
@@ -2554,6 +2585,45 @@ namespace SailwindPlayerModel
                     }
                     break;
 
+                case InteractionKind.Haul:
+                {
+                    var winch = _ixTarget != null ? _ixTarget.GetComponent<GPButtonRopeWinch>() : null;
+                    RopeController rope = winch != null ? winch.rope : null;
+                    bool local = Time.frameCount - _haulFrame <= 1;
+                    if (!local && rope == null) break;
+                    Vector3 belay, hand;
+                    float through;
+                    bool running;
+                    if (local)
+                    {
+                        belay = _haulBelay;
+                        hand = _haulHand;
+                        through = _haulThrough;
+                        running = _haulRunning;
+                    }
+                    else
+                    {
+                        // A crewmate: the hand in front of the eyes, where Hand Over Hand puts it, looking the way they look.
+                        belay = rope.transform.position;
+                        Vector3 eye, headUp;
+                        if (!TryGetEye(out eye, out headUp)) eye = chest + Vector3.up * 0.3f;
+                        Vector3 view = _root.rotation * Quaternion.Euler(-_lookPitch, 0f, 0f) * Vector3.forward;
+                        hand = eye + view * HaulGrip.RemoteHandReach;
+                        through = _haul.RemoteThrough(rope);
+                        running = false;
+                    }
+                    _haul.Update(belay, hand, through, running, bodyRight, dt);
+                    gr = new HandGrip { On = true, Palm = _haul.PalmR, Normal = -bodyRight, Finger = bodyFwd, Axis = _haul.Axis };
+                    gl = new HandGrip { On = true, Palm = _haul.PalmL, Normal = bodyRight, Finger = bodyFwd, Axis = _haul.Axis };
+                    // Hand Over Hand draws the local player's own rope to the hand.
+                    if (local) _haul.HideRope();
+                    else _haul.DrawRope(rope, belay, _root);
+                    float resistance = rope != null ? rope.currentResistance : 0f;
+                    if (float.IsNaN(resistance) || resistance < 0f) resistance = 0f;
+                    haulLeanGoal = HaulLeanBase + HaulLeanLoad * Mathf.Clamp01(resistance / 40f);
+                    break;
+                }
+
                 case InteractionKind.Push:
                 {
                     Vector3 l, r;
@@ -2576,6 +2646,8 @@ namespace SailwindPlayerModel
                 if (!gl.On && _bUpperLegL != null && _bLowerLegL != null)
                     gl = SeatedHand(false, hips, seatFwd, -seatRight);
             }
+
+            _haulLean = Mathf.Lerp(_haulLean, haulLeanGoal, 1f - Mathf.Exp(-4f * Mathf.Max(dt, 0f)));
 
             float blendSpeed = carry ? HeldToolPose.BlendSpeed.Value : InteractionTuning.BlendSpeed.Value;
             float down = carry ? HeldToolPose.ElbowDown.Value : InteractionTuning.ElbowDown.Value;

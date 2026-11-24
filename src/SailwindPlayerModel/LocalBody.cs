@@ -291,6 +291,11 @@ namespace SailwindPlayerModel
                     _body.SetInteraction(kind, target);
                     if (visible) _renderHeld = target;
                     break;
+                case InteractionKind.Haul:
+                    _body.SetInteraction(kind, target);
+                    if (HandOverHandBridge.TryGetHold(out _, out Vector3 belay, out Vector3 hand, out float through, out bool running))
+                        _body.SetHaulHold(belay, hand, through, running);
+                    break;
                 default:
                     _body.SetInteraction(kind, target);
                     break;

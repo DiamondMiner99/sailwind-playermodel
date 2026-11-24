@@ -189,6 +189,16 @@ namespace SailwindPlayerModel
                     Plugin.Log.LogWarning("[Character] Refused to open outside a cursor menu.");
                     return;
                 }
+                // Pictures added to, changed in or taken out of the patterns folder since it was last read. Every body
+                // wearing one is drawn again with the new picture (your own fully, so the seated first-person copy of its
+                // material follows), then the old pictures are freed, and the Pattern button is measured again.
+                if (PatternImages.Rescan())
+                {
+                    PlayerAppearance.RecolorPictureBodies();
+                    PlayerModel.ApplyAppearanceLive();
+                    PatternImages.ReleaseReplaced();
+                    _stylesBuilt = false;
+                }
                 // Take a private COPY of the array. PlayerAppearance is a struct holding a byte[], so a plain
                 // assignment would share the array with Plugin's stored appearance and every registry
                 // entry - editing here would mutate them in place behind their backs.
@@ -545,6 +555,7 @@ namespace SailwindPlayerModel
                     foreach (var option in colorSlot.Palette) dropTexts.Add(option.Name);
                 foreach (var slot in PlayerAppearance.Slots) dropTexts.Add(slot.Label);
                 dropTexts.AddRange(PlayerAppearance.PatternNames);
+                dropTexts.AddRange(PatternImages.Names);
                 foreach (var text in dropTexts)
                     _dropW = Mathf.Max(_dropW, TextWidth(_drop, text) + slack);
                 foreach (var text in new[] { "Hue", "Saturation", "Brightness", "Pattern", "Scale" })
@@ -1542,6 +1553,9 @@ namespace SailwindPlayerModel
             public int Pattern;
             public Color PatBase, PatColor;
             public byte PatSize;
+            /// <summary>A picture's row (Pattern is PlayerAppearance.ImageType): the picture, and its width over height.</summary>
+            public Texture Image;
+            public float ImageAspect;
         }
 
         private const int PaintKey = 1, PatternKey = 2;
@@ -1791,7 +1805,14 @@ namespace SailwindPlayerModel
             GUI.DrawTexture(new Rect(box.x - 1f, box.y - 1f, box.width + 2f, box.height + 2f), Texture2D.whiteTexture);
             GUI.color = Opaque(item.PatBase);
             GUI.DrawTexture(box, Texture2D.whiteTexture);
-            if (item.Pattern > 0)
+            if (item.Image != null)
+            {
+                // The picture at the swatch's height, repeated across it, tinted like the body draws it.
+                GUI.color = Opaque(item.PatColor);
+                float across = box.width / Mathf.Max(box.height * Mathf.Max(item.ImageAspect, 0.05f), 1f);
+                GUI.DrawTextureWithTexCoords(box, item.Image, new Rect(0f, 0f, across, 1f), true);
+            }
+            else if (item.Pattern > 0 && item.Pattern < PlayerAppearance.PatternKeys.Length)
             {
                 GUI.color = Opaque(item.PatColor);
                 // The body's band count goes as 1.5 * 0.4^size (BodyPattern.cginc), so the bands here widen by its inverse.
@@ -2019,11 +2040,21 @@ namespace SailwindPlayerModel
         {
             PlayerAppearance.Pattern p;
             if (!PickPattern(out p)) return 0;
-            return p.Type + (_pickPart != BodyPart ? 1 : 0);
+            int at = p.Type;
+            if (p.Type == PlayerAppearance.ImageType)
+            {
+                // A picture comes after the built in patterns, in the folder's order. One not in the folder selects nothing.
+                int i = PatternImages.Names.IndexOf(p.Image);
+                at = i >= 0 ? PlayerAppearance.PatternNames.Length + i : -1;
+                if (at < 0) return -1;
+            }
+            return at + (_pickPart != BodyPart ? 1 : 0);
         }
 
         private static string DescribePattern()
         {
+            PlayerAppearance.Pattern own;
+            if (PickPattern(out own) && own.Type == PlayerAppearance.ImageType && own.Image != null) return own.Image;
             int choice = PatternChoice();
             if (_pickPart != BodyPart)
             {
@@ -2042,7 +2073,10 @@ namespace SailwindPlayerModel
             else if (!_working.TryGetBodyColor(_pickColor, out under)) under = SailwindSkin.ParchmentDark;
             PlayerAppearance.Pattern eff;
             bool hasEff = EffectivePickPattern(out eff) && eff.Type > 0;
-            Color over = hasEff ? (Color)eff.Color : (Color)DefaultPatternColor();
+            bool effImage = hasEff && eff.Type == PlayerAppearance.ImageType;
+            // A picture's color is a tint and a pattern's is a second color, so neither carries over to the other kind.
+            Color over = hasEff && !effImage ? (Color)eff.Color : (Color)DefaultPatternColor();
+            Color tint = effImage ? (Color)eff.Color : Color.white;
             byte size = hasEff ? eff.Size : MediumSize;   // the swatches at the Scale set now
 
             var items = new System.Collections.Generic.List<DropItem>();
@@ -2051,12 +2085,31 @@ namespace SailwindPlayerModel
                 // "Same as body" shows the body's pattern.
                 PlayerAppearance.Pattern body;
                 bool has = _working.TryGetBodyPattern(_pickColor, out body) && body.Type > 0;
-                items.Add(new DropItem { Text = SameText, PatternSwatch = true, Pattern = has ? body.Type : 0,
-                    PatBase = under, PatColor = has ? (Color)body.Color : over, PatSize = has ? body.Size : size });
+                var same = new DropItem { Text = SameText, PatternSwatch = true, Pattern = has ? body.Type : 0,
+                    PatBase = under, PatColor = has ? (Color)body.Color : over, PatSize = has ? body.Size : size };
+                Texture2D bodyImage;
+                float bodyAspect;
+                if (has && body.Type == PlayerAppearance.ImageType && PatternImages.TryGet(body.Image, out bodyImage, out bodyAspect))
+                {
+                    same.Image = bodyImage;
+                    same.ImageAspect = bodyAspect;
+                }
+                items.Add(same);
             }
             for (int t = 0; t < PlayerAppearance.PatternNames.Length; t++)
                 items.Add(new DropItem { Text = PlayerAppearance.PatternNames[t], PatternSwatch = true, Pattern = t,
                     PatBase = under, PatColor = over, PatSize = size });
+            // The pictures in the patterns folder, by name. All decoded first, so the list holds only usable ones and
+            // lines up with the names PatternChoice and ApplyPatternChoice index.
+            PatternImages.LoadListed();
+            foreach (var name in PatternImages.Names)
+            {
+                Texture2D image;
+                float aspect;
+                PatternImages.TryGet(name, out image, out aspect);
+                items.Add(new DropItem { Text = name, PatternSwatch = true, Pattern = PlayerAppearance.ImageType,
+                    PatBase = under, PatColor = tint, PatSize = size, Image = image, ImageAspect = aspect });
+            }
             return items;
         }
 
@@ -2093,7 +2146,24 @@ namespace SailwindPlayerModel
                 PlayerAppearance.Pattern basis;
                 bool hasBasis = EffectivePickPattern(out basis) && basis.Type > 0;
                 var next = hasBasis ? basis : new PlayerAppearance.Pattern { Size = MediumSize, Color = DefaultPatternColor() };
-                next.Type = (byte)Mathf.Clamp(type, 0, PlayerAppearance.PatternKeys.Length - 1);
+                bool wasImage = hasBasis && basis.Type == PlayerAppearance.ImageType;
+                int image = type - PlayerAppearance.PatternNames.Length;
+                if (image >= 0)
+                {
+                    var names = PatternImages.Names;
+                    if (image >= names.Count) return;
+                    next.Type = PlayerAppearance.ImageType;
+                    next.Image = names[image];
+                    // A picture starts as drawn: a white tint.
+                    if (!wasImage) next.Color = new Color32(255, 255, 255, 255);
+                }
+                else
+                {
+                    next.Type = (byte)Mathf.Clamp(type, 0, PlayerAppearance.PatternKeys.Length - 1);
+                    next.Image = null;
+                    // A picture's tint is usually white, which is no color for stripes.
+                    if (wasImage) next.Color = DefaultPatternColor();
+                }
                 SetPickPattern(next);
             }
         }

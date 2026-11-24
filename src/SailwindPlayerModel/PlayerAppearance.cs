@@ -524,10 +524,19 @@ namespace SailwindPlayerModel
         public struct Pattern
         {
             public bool Set;
-            public byte Type;     // index into PatternKeys; 0 is none. The shader's type numbers are the same.
+            public byte Type;     // index into PatternKeys, or ImageType; 0 is none. The shader's type numbers are the same.
             public byte Size;     // 0 small to 255 large; the shader gets Size / 255
-            public Color32 Color;
+            public Color32 Color; // the pattern's color; for a picture, a tint (white shows it as drawn)
+            public string Image;  // ImageType only: the picture's name in PatternImages
         }
+
+        /// <summary>
+        /// A picture from the patterns folder (PatternImages), saved as "img:Name,size,RRGGBB". The shader's type 17. A
+        /// body whose picture is not in the folder here shows plain cloth. A build from before pictures cannot read the
+        /// key and skips it: plain cloth for the whole body, and for a part, the body's pattern.
+        /// </summary>
+        public const byte ImageType = 17;
+        private const string ImagePrefix = "img:";
 
         /// <summary>Saved tokens, in the shader's type order. NEVER reordered or renamed once shipped.</summary>
         public static readonly string[] PatternKeys =
@@ -630,18 +639,22 @@ namespace SailwindPlayerModel
 
         private static Pattern Clean(Pattern p)
         {
+            string image = p.Type == ImageType ? PatternImages.Clean(p.Image) : null;
+            bool known = p.Type < PatternKeys.Length || (p.Type == ImageType && image != null);
             return new Pattern
             {
                 Set = true,
-                Type = p.Type < PatternKeys.Length ? p.Type : (byte)0,
+                Type = known ? p.Type : (byte)0,
                 Size = p.Size,
                 Color = Opaque(p.Color),
+                Image = known ? image : null,
             };
         }
 
         private static string FormatPattern(Pattern p)
         {
-            return PatternKeys[p.Type < PatternKeys.Length ? p.Type : 0] + "," + p.Size + "," + ToHex(p.Color);
+            string type = p.Type == ImageType && p.Image != null ? ImagePrefix + p.Image : PatternKeys[p.Type < PatternKeys.Length ? p.Type : 0];
+            return type + "," + p.Size + "," + ToHex(p.Color);
         }
 
         private static bool TryParsePattern(string s, out Pattern p)
@@ -649,22 +662,39 @@ namespace SailwindPlayerModel
             p = default(Pattern);
             var parts = s.Split(',');
             if (parts.Length != 3) return false;
-            int type = Array.IndexOf(PatternKeys, parts[0].Trim());
+            string token = parts[0].Trim();
+            string image = null;
+            int type;
+            if (token.StartsWith(ImagePrefix, StringComparison.Ordinal))
+            {
+                image = PatternImages.Clean(token.Substring(ImagePrefix.Length));
+                type = image != null ? ImageType : -1;
+            }
+            else type = Array.IndexOf(PatternKeys, token);
             int size;
             Color32 c;
             if (type < 0 || !int.TryParse(parts[1].Trim(), out size) || !TryParseHex(parts[2], out c)) return false;
-            p = Clean(new Pattern { Type = (byte)type, Size = (byte)Mathf.Clamp(size, 0, 255), Color = c });
+            p = Clean(new Pattern { Type = (byte)type, Size = (byte)Mathf.Clamp(size, 0, 255), Color = c, Image = image });
             return true;
         }
 
         /// <summary>
         /// Put a pattern's type, size and color into a material or a property block, as the shader's _PatA (cloth) or
-        /// _PatB (trim).
+        /// _PatB (trim), and a picture as _PatATex or _PatBTex with its width over height in _PatA.z. A picture that is
+        /// not in the patterns folder here goes in as no pattern.
         /// </summary>
-        private static void PutPattern(int colorSlot, Pattern p, Action<string, Vector4> vec, Action<string, Color> col)
+        private static void PutPattern(int colorSlot, Pattern p, Action<string, Vector4> vec, Action<string, Color> col, Action<string, Texture> tex)
         {
             string name = ColorSlots[colorSlot].Key == "c_primary" ? "_PatA" : "_PatB";
-            vec(name, new Vector4(p.Set ? p.Type : 0, p.Size / 255f, 0, 0));
+            int type = p.Set ? p.Type : 0;
+            float aspect = 0f;
+            if (type == ImageType)
+            {
+                Texture2D picture;
+                if (PatternImages.TryGet(p.Image, out picture, out aspect)) tex(name + "Tex", picture);
+                else type = 0;
+            }
+            vec(name, new Vector4(type, p.Size / 255f, aspect, 0));
             col(name + "Color", (Color)p.Color);
         }
 
@@ -1061,6 +1091,44 @@ namespace SailwindPlayerModel
             }
             ApplyStubble(mat);
             ApplyPatternShader(c, mat, src);
+            NotePictures(c);
+        }
+
+        // Bodies whose look names a picture, by customizer instance id, with that look: when the patterns folder changes,
+        // RecolorPictureBodies draws them again with the new pictures, or plain where one is gone.
+        private static readonly Dictionary<int, KeyValuePair<CharacterCustomizer, string>> _pictureBodies =
+            new Dictionary<int, KeyValuePair<CharacterCustomizer, string>>();
+
+        private bool UsesPicture()
+        {
+            if (PatBody != null) foreach (var p in PatBody) if (p.Set && p.Type == ImageType) return true;
+            if (PatPart != null) foreach (var p in PatPart) if (p.Set && p.Type == ImageType) return true;
+            return false;
+        }
+
+        private void NotePictures(CharacterCustomizer c)
+        {
+            if (c == null) return;
+            if (UsesPicture()) _pictureBodies[c.GetInstanceID()] = new KeyValuePair<CharacterCustomizer, string>(c, Serialize());
+            else _pictureBodies.Remove(c.GetInstanceID());
+        }
+
+        /// <summary>
+        /// Recolor every body whose look names a picture, after the patterns folder changed, so none is left holding a
+        /// picture that was replaced or removed. A recolor only: what they wear is unchanged.
+        /// </summary>
+        public static void RecolorPictureBodies()
+        {
+            var bodies = new List<KeyValuePair<CharacterCustomizer, string>>(_pictureBodies.Values);
+            var dead = new List<int>();
+            foreach (var kv in _pictureBodies) if (kv.Value.Key == null) dead.Add(kv.Key);
+            foreach (var id in dead) _pictureBodies.Remove(id);
+            foreach (var body in bodies)
+            {
+                if (body.Key == null) continue;
+                try { Deserialize(body.Value).ApplyColorsLive(body.Key); }
+                catch (Exception e) { Plugin.Log.LogWarning("[Appearance] Could not redraw a body's pictures: " + e.Message); }
+            }
         }
 
         /// <summary>
@@ -1081,7 +1149,7 @@ namespace SailwindPlayerModel
                     if (!TakesPattern(i)) continue;
                     Pattern p;
                     TryGetBodyPattern(i, out p);   // default (none) when there is no entry
-                    PutPattern(i, p, (n, v) => mat.SetVector(n, v), (n, col) => mat.SetColor(n, col));
+                    PutPattern(i, p, (n, v) => mat.SetVector(n, v), (n, col) => mat.SetColor(n, col), (n, t) => mat.SetTexture(n, t));
                 }
                 BodyPatterns.Track(c);
             }
@@ -1158,7 +1226,7 @@ namespace SailwindPlayerModel
                         Pattern pat;
                         if (!TakesPattern(k) || !TryGetPartPattern(s, k, out pat)) continue;
                         any = true;
-                        PutPattern(k, pat, (n, v) => _block.SetVector(n, v), (n, v) => _block.SetColor(n, v));
+                        PutPattern(k, pat, (n, v) => _block.SetVector(n, v), (n, v) => _block.SetColor(n, v), (n, t) => _block.SetTexture(n, t));
                     }
 
                 foreach (var list in lists)
@@ -1232,7 +1300,11 @@ namespace SailwindPlayerModel
         {
             if (bodyClone == null) return;
             var c = bodyClone.GetComponentInChildren<CharacterCustomizer>(true);
-            if (c != null) _hidesBeard.Remove(c.GetInstanceID());
+            if (c != null)
+            {
+                _hidesBeard.Remove(c.GetInstanceID());
+                _pictureBodies.Remove(c.GetInstanceID());
+            }
             BodyPatterns.Untrack(c);
         }
 

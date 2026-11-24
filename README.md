@@ -21,7 +21,9 @@ other mods can add buttons to.
   a bucket, is left to first person, because these views judge the tip against the way you were looking when
   the view opened. While swimming in the follow view, Crouch dives and Jump brings you back up.
 - Both hands are posed on what you are using: the ship's wheel, winches, the anchor winch, the bilge pump,
-  sail pushers and mooring ropes. A Shipyard Expansion tiller is held at its end with one hand. Held items are
+  sail pushers and mooring ropes. A Shipyard Expansion tiller is held at its end with one hand. A rope held with the
+  Hand Over Hand mod is held in both hands between the winch and your hand and hauled hand over hand, leaning back
+  harder on a heavy rope; crewmates in Sailwind Co-op see the rope run from the winch to your hands. Held items are
   held by their handles and edges and follow what the game does with them: drinking, eating, smoking, reading,
   sighting, sweeping, and turning an item with the scroll wheel.
 - While Held Tool Mode is ItemInHand (the default) and Interactions are enabled, a barrel you drink from goes
@@ -56,7 +58,12 @@ other mods can add buttons to.
   sets skin, hair, cloth, trim, leather and metal from a palette, or to any color with the hue, saturation and
   brightness sliders, for the whole body or for one part. Cloth and trim can carry a pattern with a scale: stripes,
   pinstripes, checks, plaid, fade, Breton, diagonal, chevron, diamonds, argyle, gingham, windowpane, waves, dots,
-  halves or quartered. Pointing at a pattern in the list shows it on your character before you pick it. Randomize
+  halves or quartered. Pointing at a pattern in the list shows it on your character before you pick it. Your own
+  pictures can be patterns too: put up to 16 PNG or JPG files, each up to 2048 pixels on a side, in
+  `BepInEx\config\SailwindPlayerModel\Patterns` and they are listed after the built in patterns under their file
+  names, the next time the Character screen opens. A picture is repeated over the cloth or trim in its own colors, the
+  Scale sets how big, and the pattern color tints it (white shows it as drawn). Its transparent parts show the color
+  underneath. A crewmate without a picture of the same name in their folder sees that cloth plain. Randomize
   rolls a new look, and the arrows beside it step back and forward through the last 30 rolls. Drag the preview, or
   hold the arrows under it, to turn it. Uses the game's NPC parts. It is drawn larger on screens taller than 1080
   pixels, and the UIScale setting makes it larger or smaller. In a window too small for it, it shrinks to fit.

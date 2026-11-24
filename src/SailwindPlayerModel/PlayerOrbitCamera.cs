@@ -535,6 +535,9 @@ namespace SailwindPlayerModel
         /// </summary>
         private static bool WantsToFaceCamera()
         {
+            // Holding a rope with Hand Over Hand, the hand is in front of the body, so turning the body to the camera
+            // would haul or let out rope with the mouse. The body keeps its facing, and backing up hauls.
+            if (HandOverHandBridge.TryGetHold(out _, out _, out _, out _, out _)) return false;
             if (GameInput.GetKey(InputName.MoveUp) || GameInput.GetKey(InputName.MoveDown)
                 || GameInput.GetKey(InputName.MoveLeft) || GameInput.GetKey(InputName.MoveRight)) return true;
             if (Mathf.Abs(GameInput.GetPrimaryHorizontal()) > StickDeadZone || Mathf.Abs(GameInput.GetPrimaryVertical()) > StickDeadZone) return true;

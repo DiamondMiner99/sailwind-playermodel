@@ -11,12 +11,13 @@
 // the middle (a leg at the knee) follows its upper bone, so its lower half drifts a little. The character's meshes are
 // not readable on the CPU, which rules out baking rest positions into the mesh.
 //
-// _PatA and _PatB are (type, size from 0 small to 1 large, unused, unused) for cloth and trim; _PatAColor and _PatBColor the pattern's color.
+// _PatA and _PatB are (type, size from 0 small to 1 large, picture width over height, unused) for cloth and trim;
+// _PatAColor and _PatBColor the pattern's color, or for a picture its tint; _PatATex and _PatBTex the pictures.
 // _PatRange.xy is the rest height range of the part, for Fade and Quartered, and _PatRange.w is 1 once the mod has
 // placed this renderer; until then (w stays at the material's 0) no pattern is drawn, rather than one at a meaningless position. Types: 0 none, 1 stripes,
 // 2 pinstripes, 3 checks, 4 plaid, 5 fade, 6 breton, 7 diagonal, 8 chevron, 9 diamonds, 10 argyle, 11 gingham,
-// 12 windowpane, 13 waves, 14 dots, 15 halves, 16 quartered. The mod's PlayerAppearance.PatternKeys table must stay in
-// this order.
+// 12 windowpane, 13 waves, 14 dots, 15 halves, 16 quartered, 17 a picture the player added (PatternImages). The mod's
+// PlayerAppearance.PatternKeys table must stay in this order, and PlayerAppearance.ImageType is 17.
 //
 // Around the body, u runs over roughly 0.55 body heights at the chest, so a count n around and m up give square cells
 // when n is about 0.55 m. Every count around is a whole number, so the pattern meets itself down the back.
@@ -27,6 +28,7 @@
 float4x4 _PatSpace;
 float4 _PatA, _PatB, _PatRange;
 fixed4 _PatAColor, _PatBColor;
+sampler2D _PatATex, _PatBTex;
 
 // Bands from a triangle wave, softened by how fast x changes on screen so distant stripes blur instead of shimmering.
 // duty is the share of each period that is pattern.
@@ -43,7 +45,7 @@ float PatBand(float x, float duty) { return PatBandW(x, duty, fwidth(x)); }
 // How much of the pattern color shows at rest position p (0..1).
 float PatAmount(float type, float size, float3 p, float4 range)
 {
-    if (type < 0.5) return 0;
+    if (type < 0.5 || type > 16.5) return 0;
     // Size 0 is small (1.5 times the base count), 1 large (0.6 times), geometric between so each step looks alike.
     float k = 1.5 * pow(0.4, saturate(size));
     // Around the body's center line, 0..1. Used for lines that run down the body. u wraps from 1 to 0 down the middle
@@ -135,6 +137,25 @@ float PatAmount(float type, float size, float3 p, float4 range)
     return lerp(side, 1.0 - side, low);
 }
 
+// A picture (type 17) tiled over the color, in its own colors times the tint, its transparent parts showing the color
+// underneath. Tiled a whole number of times around the body so it meets itself down the back: from 8 times at the
+// smallest scale to once at the largest, and up the body as often as keeps its shape (u covers about 0.55 body heights
+// around the chest). Run backward around the body so a picture reads the right way round from the front. Its sampling
+// rate across the wrap is taken from a copy wrapping at the front, as the line patterns do, so the back gets no seam.
+fixed3 PatPicture(fixed3 base, float4 pat, fixed4 tint, sampler2D tex, float3 p)
+{
+    float n = max(1.0, round(8.0 * pow(0.125, saturate(pat.y))));
+    float m = n * max(pat.z, 0.05) / 0.55;
+    float u = 0.5 - atan2(p.x, p.z) * 0.15915494;
+    float2 uv = float2(u * n, p.y * m);
+    float2 uvb = float2(frac(u + 0.5) * n, uv.y);
+    float2 dx = ddx(uv), dy = ddy(uv), dxb = ddx(uvb), dyb = ddy(uvb);
+    dx.x = abs(dxb.x) < abs(dx.x) ? dxb.x : dx.x;
+    dy.x = abs(dyb.x) < abs(dy.x) ? dyb.x : dy.x;
+    fixed4 c = tex2Dgrad(tex, uv, dx, dy);
+    return lerp(base, c.rgb * tint.rgb, c.a);
+}
+
 // The cloth and trim colors at this world position, with their patterns.
 void PatColors(float3 worldPos, fixed3 primary, fixed3 secondary, out fixed3 outPrimary, out fixed3 outSecondary)
 {
@@ -142,8 +163,10 @@ void PatColors(float3 worldPos, fixed3 primary, fixed3 secondary, out fixed3 out
     outSecondary = secondary;
     if ((_PatA.x < 0.5 && _PatB.x < 0.5) || _PatRange.w < 0.5) return;
     float3 p = mul(_PatSpace, float4(worldPos, 1.0)).xyz;
-    outPrimary = lerp(primary, _PatAColor.rgb, PatAmount(_PatA.x, _PatA.y, p, _PatRange));
-    outSecondary = lerp(secondary, _PatBColor.rgb, PatAmount(_PatB.x, _PatB.y, p, _PatRange));
+    outPrimary = _PatA.x > 16.5 ? PatPicture(primary, _PatA, _PatAColor, _PatATex, p)
+        : lerp(primary, _PatAColor.rgb, PatAmount(_PatA.x, _PatA.y, p, _PatRange));
+    outSecondary = _PatB.x > 16.5 ? PatPicture(secondary, _PatB, _PatBColor, _PatBTex, p)
+        : lerp(secondary, _PatBColor.rgb, PatAmount(_PatB.x, _PatB.y, p, _PatRange));
 }
 
 #endif
